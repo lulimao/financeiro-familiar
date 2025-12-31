@@ -545,11 +545,19 @@ def inicializar_sistema_completo():
         return SistemaAutenticacao()
 
 # ---------- Instanciar sistema de autenticação ----------
+# Inicializar auth como None primeiro
+auth = None
+
 try:
     auth = inicializar_sistema_completo()
 except Exception as e:
     st.error(f"⚠️ Erro ao inicializar: {e}. Tentando continuar...")
-    auth = SistemaAutenticacao()
+    try:
+        auth = SistemaAutenticacao()
+    except Exception as e2:
+        st.error(f"❌ Erro crítico: Não foi possível inicializar o sistema: {e2}")
+        # Forçar criação de uma instância básica
+        auth = None
 
 # ---------- Funções auxiliares ----------
 def load_config():
@@ -1062,6 +1070,13 @@ def pagina_login():
         with st.container():
             st.markdown("### Acesse sua conta")
             
+            # Verificar se auth está inicializado
+            if auth is None:
+                st.error("❌ Sistema não inicializado. Recarregue a página.")
+                if st.button("🔄 Recarregar"):
+                    st.rerun()
+                return
+            
             # Mensagem informativa
             with st.expander("ℹ️ Informações de acesso"):
                 st.info("""
@@ -1137,6 +1152,14 @@ def pagina_alterar_senha():
         with st.container():
             st.markdown("### Redefinir Senha")
             
+            # Verificar se auth está inicializado
+            if auth is None:
+                st.error("❌ Sistema não inicializado. Volte para o login.")
+                if st.button("↩️ Voltar para Login"):
+                    st.session_state.pagina_atual = "login"
+                    st.rerun()
+                return
+            
             username = st.text_input("Usuário", key="alterar_username")
             senha_atual = st.text_input("Senha Atual", type="password", key="alterar_senha_atual")
             nova_senha = st.text_input("Nova Senha", type="password", key="alterar_nova_senha")
@@ -1187,6 +1210,14 @@ def pagina_recuperar_senha():
         with st.container():
             st.markdown("### Redefinir Senha")
             
+            # Verificar se auth está inicializado
+            if auth is None:
+                st.error("❌ Sistema não inicializado. Volte para o login.")
+                if st.button("↩️ Voltar para Login"):
+                    st.session_state.pagina_atual = "login"
+                    st.rerun()
+                return
+            
             username = st.text_input("Usuário", key="recuperar_username")
             senha_atual = st.text_input("Senha Atual", type="password", key="recuperar_senha_atual")
             nova_senha = st.text_input("Nova Senha", type="password", key="recuperar_nova_senha")
@@ -1212,6 +1243,18 @@ def pagina_recuperar_senha():
 
 # ---------- Página Principal ----------
 def pagina_principal():
+    # Verificar se auth está inicializado
+    if auth is None:
+        st.error("❌ Sistema não inicializado. Faça login novamente.")
+        if st.button("🚪 Voltar para Login"):
+            st.session_state.autenticado = False
+            st.session_state.usuario = None
+            st.session_state.tipo_usuario = None
+            st.session_state.usuario_id = None
+            st.session_state.pagina_atual = "login"
+            st.rerun()
+        return
+    
     # Barra lateral com informações do usuário
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.usuario}")
@@ -1825,6 +1868,11 @@ def pagina_gerenciar_usuarios():
         st.error("❌ Acesso restrito a administradores.")
         return
     
+    # Verificar se auth está inicializado
+    if auth is None:
+        st.error("❌ Sistema não inicializado.")
+        return
+    
     tab1, tab2 = st.tabs(["📋 Lista de Usuários", "➕ Criar Novo Usuário"])
     
     with tab1:
@@ -1973,6 +2021,11 @@ def pagina_gerenciar_usuarios():
 def pagina_minha_conta():
     st.header("🔧 Minha Conta")
     
+    # Verificar se auth está inicializado
+    if auth is None:
+        st.error("❌ Sistema não inicializado.")
+        return
+    
     col1, col2 = st.columns([1, 2])
     
     with col1:
@@ -2093,13 +2146,22 @@ def pagina_configuracoes():
 # ---------- Roteamento Principal ----------
 def main():
     try:
-        # Seu código atual (mantenha tudo que está dentro de main())
         # ---------- Inicialização ----------
         if IS_STREAMLIT_CLOUD:
             inicializar_arquivos_cloud()
         
+        # Verificar se auth foi inicializado
+        global auth
+        if auth is None:
+            st.error("❌ Falha crítica: Sistema de autenticação não inicializado.")
+            st.info("Recarregue a página ou verifique os logs para mais detalhes.")
+            return
+        
         # Inicializar banco de dados
-        auth._verificar_e_atualizar_estrutura_banco()
+        try:
+            auth._verificar_e_atualizar_estrutura_banco()
+        except Exception as e:
+            st.warning(f"⚠️ Aviso ao inicializar banco: {e}")
         
         if not st.session_state.autenticado:
             if st.session_state.pagina_atual == "login":
@@ -2118,7 +2180,6 @@ def main():
             if st.button("🔄 Tentar Reiniciar"):
                 # Limpar caches e estado
                 try:
-                    import streamlit as st
                     st.cache_data.clear()
                     st.session_state.clear()
                 except:

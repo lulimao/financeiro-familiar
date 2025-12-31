@@ -1,4 +1,6 @@
-.env
-*.txt
-__pycache__/
 *.pyc
+__pycache__/
+financeiro.db
+config.json
+Renda_2026.xlsx
+.env

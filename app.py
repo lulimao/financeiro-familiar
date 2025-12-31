@@ -148,8 +148,6 @@ def inicializar_arquivos_cloud():
 if not IS_STREAMLIT_CLOUD:
     os.system('clear' if os.name == 'posix' else 'cls')
 
-# ... (restante do código permanece igual)
-
 # ---------- Sistema de Autenticação Melhorado ----------
 class SistemaAutenticacao:
     def __init__(self, db_file="financeiro.db"):
@@ -267,38 +265,37 @@ class SistemaAutenticacao:
         # 6. Migrar dados existentes
         self._migrar_dados_existentes()
     
-    # ---------- Migração de dados ----------
-def migrar_dados_existentes():
-    """Migra dados existentes para a nova estrutura"""
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    try:
-        # Verificar se existem transações sem usuario_id
-        cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
-        count = cur.fetchone()[0]
+    def _migrar_dados_existentes(self):
+        """Migra dados existentes para a nova estrutura"""
+        conn = sqlite3.connect(self.db_file)
+        cur = conn.cursor()
         
-        if count > 0:
-            st.warning(f"⚠️ Migrando {count} transações existentes...")
+        try:
+            # Verificar se existem transações sem usuario_id
+            cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
+            count = cur.fetchone()[0]
             
-            # Atribuir ao primeiro usuário ADM encontrado
-            cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
-            admin_id = cur.fetchone()
-            
-            if admin_id:
-                admin_id = admin_id[0]
-                cur.execute("""
-                    UPDATE transacoes 
-                    SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
-                    WHERE usuario_id IS NULL
-                """, (admin_id,))
-                conn.commit()
-                st.success(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
-    
-    except Exception as e:
-        st.error(f"Erro na migração: {e}")
-    finally:
-        conn.close()
+            if count > 0:
+                print(f"⚠️ Migrando {count} transações existentes...")
+                
+                # Atribuir ao primeiro usuário ADM encontrado
+                cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
+                admin_id = cur.fetchone()
+                
+                if admin_id:
+                    admin_id = admin_id[0]
+                    cur.execute("""
+                        UPDATE transacoes 
+                        SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
+                        WHERE usuario_id IS NULL
+                    """, (admin_id,))
+                    conn.commit()
+                    print(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
+        
+        except Exception as e:
+            print(f"Erro na migração: {e}")
+        finally:
+            conn.close()
     
     def _criar_admin_padrao(self):
         """Cria usuário administrador padrão se não existir"""
@@ -603,39 +600,6 @@ def migrar_dados_existentes():
         finally:
             conn.close()
 
-# ---------- Migração de dados ----------
-def migrar_dados_existentes():
-    """Migra dados existentes para a nova estrutura"""
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    try:
-        # Verificar se existem transações sem usuario_id
-        cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
-        count = cur.fetchone()[0]
-        
-        if count > 0:
-            st.warning(f"⚠️ Migrando {count} transações existentes...")
-            
-            # Atribuir ao primeiro usuário ADM encontrado
-            cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
-            admin_id = cur.fetchone()
-            
-            if admin_id:
-                admin_id = admin_id[0]
-                cur.execute("""
-                    UPDATE transacoes 
-                    SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
-                    WHERE usuario_id IS NULL
-                """, (admin_id,))
-                conn.commit()
-                st.success(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
-    
-    except Exception as e:
-        st.error(f"Erro na migração: {e}")
-    finally:
-        conn.close()
-
 # ---------- Inicialização Robusta do Sistema ----------
 def inicializar_sistema_completo():
     """Inicializa todo o sistema com tratamento de erros"""
@@ -643,11 +607,11 @@ def inicializar_sistema_completo():
         # Inicializar sistema de autenticação (que já cria as tabelas)
         auth_system = SistemaAutenticacao()
         
-        # Garantir que tabelas existem
+        # Garantir que tabelas existem (redundante, mas seguro)
         ensure_tables_exist()
         
-        # Migrar dados existentes
-        migrar_dados_existentes()  # AGORA ESTÁ DEFINIDA ANTES!
+        # A migração já é feita no __init__ do SistemaAutenticacao
+        # Não precisa chamar migrar_dados_existentes() novamente
         
         return auth_system
     except Exception as e:
@@ -661,32 +625,6 @@ def inicializar_sistema_completo():
         # Criar novo sistema mesmo com erro
         return SistemaAutenticacao()
 
-# ---------- Inicialização Robusta do Sistema ----------
-def inicializar_sistema_completo():
-    """Inicializa todo o sistema com tratamento de erros"""
-    try:
-        # Inicializar sistema de autenticação (que já cria as tabelas)
-        auth_system = SistemaAutenticacao()
-        
-        # Garantir que tabelas existem
-        ensure_tables_exist()
-        
-        # Migrar dados existentes
-        migrar_dados_existentes()
-        
-        return auth_system
-    except Exception as e:
-        st.error(f"❌ Erro crítico na inicialização do sistema: {e}")
-        # Tentar criar um banco de dados mínimo
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            conn.close()
-        except:
-            pass
-        # Criar novo sistema mesmo com erro
-        return SistemaAutenticacao()
-
-# ---------- Instanciar sistema de autenticação ----------
 # Inicializar auth como None primeiro
 auth = None
 

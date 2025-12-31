@@ -14,6 +14,8 @@ import traceback
 # ---------- CONFIGURAÇÃO DA PÁGINA (DEVE SER A PRIMEIRA COISA) ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
+# ... (código anterior mantido)
+
 # ---------- Configurações para Cloud ----------
 IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
 
@@ -33,10 +35,89 @@ APOIO_SHEET = "Planilha apoio"
 if not BASE_DIR.exists():
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Limpar console (apenas local)
-if not IS_STREAMLIT_CLOUD:
-    os.system('clear' if os.name == 'posix' else 'cls')
+# ---------- Banco ----------
+import time
 
+def get_conn(max_retries=3, retry_delay=1):
+    """Obtém conexão com retry em caso de falha"""
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(
+                str(DB_FILE), 
+                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                timeout=30,  # Timeout de 30 segundos
+                check_same_thread=False  # Permite múltiplas threads
+            )
+            # Configurações para melhor performance
+            conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging
+            conn.execute("PRAGMA busy_timeout=5000")  # Timeout de 5 segundos
+            return conn
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) and attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
+                continue
+            else:
+                raise e
+
+def ensure_tables_exist():
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    # Tabela de transações
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_registro DATE,
+            data_pagamento DATE,
+            pessoa TEXT,
+            categoria TEXT,
+            tipo TEXT,
+            valor REAL,
+            descricao TEXT,
+            recorrente INTEGER DEFAULT 0,
+            dia_fixo INTEGER,
+            pessoa_responsavel TEXT DEFAULT 'Ambos',
+            no_cartao INTEGER DEFAULT 0,
+            investimento INTEGER DEFAULT 0,
+            vr INTEGER DEFAULT 0,
+            forma_pagamento TEXT DEFAULT 'Dinheiro',
+            parcelas INTEGER DEFAULT 1,
+            parcela_atual INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'Ativa',
+            usuario_id INTEGER,
+            grupo TEXT DEFAULT 'padrao',
+            compartilhado INTEGER DEFAULT 0,
+            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+        )
+    """)
+    
+    # Verificar e adicionar colunas ausentes se necessário
+    colunas_necessarias = [
+        'data_registro', 'data_pagamento', 'parcelas', 'parcela_atual', 'status',
+        'usuario_id', 'grupo', 'compartilhado'
+    ]
+    
+    for coluna in colunas_necessarias:
+        try:
+            if coluna == 'status':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'Ativa'")
+            elif coluna == 'usuario_id':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER")
+            elif coluna == 'grupo':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'padrao'")
+            elif coluna == 'compartilhado':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 0")
+            elif coluna in ['data_registro', 'data_pagamento']:
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} DATE")
+            else:
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+    
+    conn.commit()
+    conn.close()
+
+# ---------- Inicialização dos arquivos no Cloud ----------
 def inicializar_arquivos_cloud():
     """Criar arquivos necessários se não existirem no cloud"""
     
@@ -48,7 +129,7 @@ def inicializar_arquivos_cloud():
     
     # Criar banco de dados se não existir
     if not DB_FILE.exists():
-        ensure_tables_exist()
+        ensure_tables_exist()  # AGORA ESTÁ DEFINIDA ANTES!
         
     # Criar planilha exemplo se não existir
     if not EXCEL_APOIO.exists():
@@ -62,6 +143,12 @@ def inicializar_arquivos_cloud():
             df_exemplo.to_excel(EXCEL_APOIO, sheet_name='Planilha apoio', index=False)
         except Exception as e:
             st.warning(f"Não foi possível criar planilha exemplo: {e}")
+
+# Limpar console (apenas local)
+if not IS_STREAMLIT_CLOUD:
+    os.system('clear' if os.name == 'posix' else 'cls')
+
+# ... (restante do código permanece igual)
 
 # ---------- Sistema de Autenticação Melhorado ----------
 class SistemaAutenticacao:

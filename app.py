@@ -11,6 +11,9 @@ import re
 import os
 import traceback
 
+# ---------- CONFIGURAÇÃO DA PÁGINA (DEVE SER A PRIMEIRA COISA) ----------
+st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
+
 # ---------- Configurações para Cloud ----------
 IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
 
@@ -1033,9 +1036,6 @@ def migrar_dados_existentes():
         st.error(f"Erro na migração: {e}")
     finally:
         conn.close()
-
-# ---------- Interface Streamlit ----------
-st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
 # ---------- Gerenciamento de Sessão ----------
 if 'autenticado' not in st.session_state:

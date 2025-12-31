@@ -1,0 +1,15 @@
+Melhorias
+
+1- Menu editar não funciona: Ele abre edita e salva, porem ao consultar está igual (não registra a alteração).
+
+2- Ajustar a opção "Recorrente" e "Parcelado" para um funcionamento correto.
+
+3- Resolver botões "Processar Recorrências Agora" e "Forçar Recorrências Futuras (Teste)".
+
+4- Data de registro / data de pagamento
+
+Pagamentos registrados em dia X tipo hoje podem ter data de pagamento no dia y (diferente da de registro).
+
+Exemplo eu gastei R$ 15,00 no crédito no dia 16/12/2025 (data do registro, que preenche automático com a data do dia em caso de crédito) porém a data do pagamento vai ser dia 10/04/2026 (data de pagamento da fatura e já preenche de forma automática em casos de "crédito").
+
+Ou por exemplo eu já tenho o gasto da contribuição da festa de fim de ano previsto para 22/12/2025 (data do pagamento, que eu preencho manual em casos que não seja crédito) no débito mas estou marcando hoje que fui informado 16/12/2025 (data do registro) que já preenche de forma automática nos casos de não seja credito com a data do dia.

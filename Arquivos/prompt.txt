@@ -1,0 +1,13 @@
+Estou desenvolvendo um sistema de registro financeiro baseado em uma planilha que utilizo, e gostaria de ajuda para implementar melhorias, o sistema foi desenvolvido em Python com Streamlite e sqlite3
+
+Melhorias
+
+1 - Data de registro / data de pagamento
+
+Pagamentos registrados em dia X tipo hoje podem ter data de pagamento no dia y (diferente da de registro).
+
+Exemplo eu gastei R$ 15,00 no crédito no dia 16/12/2025 (data do registro, que preenche automático com a data do dia em caso de crédito) porém a data do pagamento vai ser dia 10/04/2026 (data de pagamento da fatura e já preenche de forma automática em casos de "crédito").
+
+Ou por exemplo eu já tenho o gasto da contribuição da festa de fim de ano previsto para 22/12/2025 (data do pagamento, que eu preencho manual em casos que não seja crédito) no débito mas estou marcando hoje que fui informado 16/12/2025 (data do registro) que já preenche de forma automática nos casos de não seja credito com a data do dia.
+
+Poderia me informar como poderia implementar e em caso de complexidade alta, pode enviar o código completo com a melhoria.

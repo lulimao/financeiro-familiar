@@ -1,0 +1,1018 @@
+import streamlit as st
+import sqlite3
+import pandas as pd
+from pathlib import Path
+from datetime import date, datetime, timedelta
+import json
+import plotly.express as px
+import calendar
+import shutil
+import glob
+import os
+
+os.system('clear' if os.name == 'posix' else 'cls')
+
+# ---------- Configurações ----------
+DB_FILE = Path("financeiro.db")
+EXCEL_APOIO = Path("Renda_2026.xlsx")
+APOIO_SHEET = "Planilha apoio"
+CONFIG_FILE = Path("config.json")
+
+def load_config():
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"dia_fatura": 10}
+
+def save_config(conf: dict):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(conf, f, ensure_ascii=False, indent=2)
+
+config = load_config()
+
+# ---------- Datas ----------
+def ajustar_para_fatura(data_compra, dia_fatura=10):
+    """
+    Ajusta a data para a fatura do cartão baseado na regra:
+    - A fatura vence sempre no dia 10 do mês seguinte à compra.
+    Exemplo: Compras em novembro (01/11 a 30/11) -> Fatura em 10/12
+             Compras em dezembro (01/12 a 31/12) -> Fatura em 10/01
+    """
+    if data_compra.month == 12:
+        # Dezembro: fatura em janeiro do ano seguinte
+        return date(data_compra.year + 1, 1, dia_fatura)
+    else:
+        # Outros meses: fatura no mês seguinte
+        return date(data_compra.year, data_compra.month + 1, dia_fatura)
+
+# ---------- Banco ----------
+def get_conn():
+    conn = sqlite3.connect(str(DB_FILE), detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    return conn
+
+def ensure_tables_exist():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_registro DATE,  -- Data em que foi registrado no sistema
+            data_pagamento DATE,  -- Data efetiva do pagamento (fatura para crédito, pagamento para outros)
+            pessoa TEXT,
+            categoria TEXT,
+            tipo TEXT,
+            valor REAL,
+            descricao TEXT,
+            recorrente INTEGER DEFAULT 0,
+            dia_fixo INTEGER,
+            pessoa_responsavel TEXT DEFAULT 'Ambos',
+            no_cartao INTEGER DEFAULT 0,
+            investimento INTEGER DEFAULT 0,
+            vr INTEGER DEFAULT 0,
+            forma_pagamento TEXT DEFAULT 'Dinheiro',
+            parcelas INTEGER DEFAULT 1,
+            parcela_atual INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'Ativa'
+        )
+    """)
+    
+    # Verificar e adicionar colunas ausentes se necessário
+    colunas_necessarias = ['data_registro', 'data_pagamento', 'parcelas', 'parcela_atual', 'status']
+    for coluna in colunas_necessarias:
+        try:
+            if coluna == 'status':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'Ativa'")
+            elif coluna in ['data_registro', 'data_pagamento']:
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} DATE")
+            else:
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+    
+    conn.commit()
+    conn.close()
+
+def inserir_transacao(tipo, data_registro, data_pagamento, descricao, valor, categoria, forma, extra_fields=None):
+    pessoa = "Ambos"
+    recorrente = 0
+    dia_fixo = None
+    pessoa_responsavel = "Ambos"
+    no_cartao = 1 if ("cred" in forma.lower() or "cart" in forma.lower()) else 0
+    investimento = 0
+    vr = 0
+    parcelas = 1
+    parcela_atual = 1
+
+    if extra_fields:
+        recorrente = int(extra_fields.get("recorrente", recorrente))
+        dia_fixo = extra_fields.get("dia_fixo", dia_fixo)
+        pessoa_responsavel = extra_fields.get("pessoa_responsavel", pessoa_responsavel)
+        no_cartao = int(extra_fields.get("no_cartao", no_cartao))
+        investimento = int(extra_fields.get("investimento", investimento))
+        vr = int(extra_fields.get("vr", vr))
+        parcelas = int(extra_fields.get("parcelas", parcelas))
+        parcela_atual = int(extra_fields.get("parcela_atual", parcela_atual))
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO transacoes (data_registro, data_pagamento, pessoa, categoria, tipo, valor, descricao, 
+        recorrente, dia_fixo, pessoa_responsavel, no_cartao, investimento, vr, forma_pagamento, 
+        parcelas, parcela_atual, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (data_registro.isoformat(), data_pagamento.isoformat(), pessoa, categoria, tipo, float(valor), descricao,
+          recorrente, dia_fixo, pessoa_responsavel, no_cartao, investimento, vr, forma, 
+          parcelas, parcela_atual, 'Ativa'))
+    
+    conn.commit()
+    conn.close()
+
+def carregar_transacoes():
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("""
+            SELECT * FROM transacoes 
+            WHERE status != 'Excluída' OR status IS NULL
+            ORDER BY data_pagamento DESC, id DESC
+        """, conn)
+        
+        # Converter colunas de data para datetime de forma segura
+        if not df.empty:
+            # Converter colunas de data
+            date_columns = ['data_registro', 'data_pagamento']
+            for col in date_columns:
+                if col in df.columns:
+                    # Converter para datetime, forçando erros para NaT
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+        
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar transações: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+# ---------- SISTEMA DE RECORRÊNCIAS AUTOMÁTICAS ----------
+def processar_recorrencias_automaticas():
+    """Processa transações recorrentes e cria os registros dos meses seguintes automaticamente"""
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    # Buscar transações recorrentes ativas
+    cur.execute("""
+        SELECT * FROM transacoes 
+        WHERE recorrente = 1 
+        AND (status IS NULL OR status != 'Excluída')
+    """)
+    
+    transacoes_recorrentes = cur.fetchall()
+    
+    # Obter nomes das colunas
+    cur.execute("PRAGMA table_info(transacoes)")
+    colunas_info = cur.fetchall()
+    colunas = [col[1] for col in colunas_info]
+    
+    hoje = date.today()
+    novas_transacoes = 0
+    
+    for transacao in transacoes_recorrentes:
+        # Mapear valores para nomes de colunas
+        transacao_dict = dict(zip(colunas, transacao))
+        
+        data_registro_original = transacao_dict['data_registro']
+        data_pagamento_original = transacao_dict['data_pagamento']
+        descricao_original = transacao_dict['descricao']
+        dia_fixo = transacao_dict.get('dia_fixo')
+        valor = transacao_dict['valor']
+        categoria = transacao_dict['categoria']
+        tipo = transacao_dict['tipo']
+        forma_pagamento = transacao_dict['forma_pagamento']
+        no_cartao = transacao_dict.get('no_cartao', 0)
+        
+        # Converter datas originais se forem string
+        if isinstance(data_registro_original, str):
+            data_registro_original = date.fromisoformat(data_registro_original)
+        if isinstance(data_pagamento_original, str):
+            data_pagamento_original = date.fromisoformat(data_pagamento_original)
+        
+        # Usar dia fixo ou dia da data de pagamento original
+        if not dia_fixo:
+            dia_fixo = data_pagamento_original.day
+        
+        # Calcular quantos meses se passaram desde o pagamento original
+        meses_passados = (hoje.year - data_pagamento_original.year) * 12 + (hoje.month - data_pagamento_original.month)
+        
+        # Para cada mês desde o pagamento original até hoje, criar transações se não existirem
+        for meses in range(1, meses_passados + 1):
+            ano = data_pagamento_original.year + (data_pagamento_original.month + meses - 1) // 12
+            mes_num = (data_pagamento_original.month + meses - 1) % 12 + 1
+            
+            # Ajustar dia para o último dia do mês se necessário
+            ultimo_dia_mes = calendar.monthrange(ano, mes_num)[1]
+            dia = min(int(dia_fixo), ultimo_dia_mes)
+            
+            data_pagamento_virtual = date(ano, mes_num, dia)
+            
+            # Só criar se for uma data passada ou presente (não futura) E após a data original
+            if data_pagamento_virtual <= hoje and data_pagamento_virtual > data_pagamento_original:
+                # Verificar se já existe esta transação recorrente para este mês
+                cur.execute("""
+                    SELECT COUNT(*) FROM transacoes 
+                    WHERE descricao LIKE ? 
+                    AND strftime('%Y-%m', data_pagamento) = ?
+                    AND recorrente = 1
+                """, (f"%{descricao_original}%", data_pagamento_virtual.strftime('%Y-%m')))
+                
+                existe = cur.fetchone()[0]
+                
+                if not existe:
+                    # Criar nova transacao recorrente
+                    nova_descricao = f"{descricao_original} ({data_pagamento_virtual.strftime('%m/%Y')})"
+                    
+                    # Calcular data de registro (hoje)
+                    data_registro_nova = hoje
+                    
+                    # Para crédito, ajustar data de pagamento para fatura
+                    if no_cartao:
+                        # Para crédito recorrente, a data de pagamento é a data da fatura
+                        data_pagamento_final = ajustar_para_fatura(data_pagamento_virtual, dia_fatura=config.get("dia_fatura", 10))
+                    else:
+                        data_pagamento_final = data_pagamento_virtual
+                    
+                    # Preparar dados para inserção
+                    dados_insercao = {
+                        'data_registro': data_registro_nova.isoformat(),
+                        'data_pagamento': data_pagamento_final.isoformat(),
+                        'pessoa': transacao_dict.get('pessoa', 'Ambos'),
+                        'categoria': categoria,
+                        'tipo': tipo,
+                        'valor': valor,
+                        'descricao': nova_descricao,
+                        'recorrente': 1,
+                        'dia_fixo': dia_fixo,
+                        'pessoa_responsavel': transacao_dict.get('pessoa_responsavel', 'Ambos'),
+                        'no_cartao': no_cartao,
+                        'investimento': transacao_dict.get('investimento', 0),
+                        'vr': transacao_dict.get('vr', 0),
+                        'forma_pagamento': forma_pagamento,
+                        'parcelas': transacao_dict.get('parcelas', 1),
+                        'parcela_atual': transacao_dict.get('parcela_atual', 1),
+                        'status': 'Ativa'
+                    }
+                    
+                    # Construir query dinâmica
+                    colunas_insert = []
+                    valores_insert = []
+                    for col, val in dados_insercao.items():
+                        if col in colunas:  # Só incluir colunas que existem na tabela
+                            colunas_insert.append(col)
+                            valores_insert.append(val)
+                    
+                    placeholders = ', '.join(['?' for _ in colunas_insert])
+                    colunas_str = ', '.join(colunas_insert)
+                    
+                    cur.execute(f"""
+                        INSERT INTO transacoes ({colunas_str})
+                        VALUES ({placeholders})
+                    """, valores_insert)
+                    
+                    novas_transacoes += 1
+    
+    conn.commit()
+    conn.close()
+    
+    return novas_transacoes
+
+# ---------- Funções para Editar/Excluir ----------
+def excluir_transacao(transacao_id):
+    """Marca uma transação como excluída (soft delete)"""
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("UPDATE transacoes SET status = 'Excluída' WHERE id = ?", (transacao_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao excluir transação: {e}")
+        return False
+    finally:
+        conn.close()
+
+def editar_transacao(transacao_id, novos_dados):
+    """Edita uma transação existente"""
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    try:
+        # Converter datas para string no formato correto
+        date_fields = ['data_registro', 'data_pagamento']
+        for field in date_fields:
+            if field in novos_dados and hasattr(novos_dados[field], 'isoformat'):
+                novos_dados[field] = novos_dados[field].isoformat()
+        
+        # Construir query dinamicamente
+        campos = []
+        valores = []
+        
+        for campo, valor in novos_dados.items():
+            # Pular campos vazios ou None
+            if valor is not None and valor != '':
+                campos.append(f"{campo} = ?")
+                valores.append(valor)
+        
+        if not campos:
+            return False, "Nenhum campo válido para atualizar"
+        
+        # Adicionar ID no final para o WHERE
+        valores.append(transacao_id)
+        
+        # Construir e executar query
+        query = f"UPDATE transacoes SET {', '.join(campos)} WHERE id = ?"
+        cur.execute(query, valores)
+        conn.commit()
+        
+        # Verificar se foi atualizado
+        cur.execute("SELECT changes()")
+        changes = cur.fetchone()[0]
+        
+        if changes > 0:
+            return True, "Transação atualizada com sucesso"
+        else:
+            return True, "Nenhuma alteração necessária (dados idênticos)"
+            
+    except Exception as e:
+        error_msg = f"Erro ao editar transação: {str(e)}"
+        return False, error_msg
+    finally:
+        conn.close()
+
+# ---------- Planilha apoio ----------
+def ler_categorias_formas():
+    categorias_default = ["Alimentação", "Moradia", "Transporte", "Lazer", "Saúde", "Educação", "Salário", "Outros"]
+    formas_default = ["Dinheiro", "Débito", "Crédito", "Transferência", "Pix", "Boleto"]
+    if not EXCEL_APOIO.exists():
+        return categorias_default, formas_default
+    try:
+        df = pd.read_excel(EXCEL_APOIO, sheet_name=APOIO_SHEET)
+        categorias = df.iloc[:, 0].dropna().astype(str).unique().tolist()
+        formas = df.iloc[:, 1].dropna().astype(str).unique().tolist()
+        return categorias, formas
+    except Exception:
+        return categorias_default, formas_default
+
+# ---------- Validações ----------
+def validar_transacao(data_registro, data_pagamento, descricao, valor, categoria):
+    erros = []
+    
+    if not descricao or descricao.strip() == "":
+        erros.append("Descrição não pode estar vazia")
+    
+    if valor <= 0:
+        erros.append("Valor deve ser maior que zero")
+    
+    if not categoria or categoria.strip() == "":
+        erros.append("Categoria é obrigatória")
+    
+    return erros
+
+# ---------- UI ----------
+st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
+st.title("💰 Financeiro Familiar")
+
+ensure_tables_exist()
+
+# PROCESSAR RECORRÊNCIAS AUTOMATICAMENTE SEMPRE QUE O APP ABRIR
+try:
+    novas_transacoes = processar_recorrencias_automaticas()
+    if novas_transacoes > 0:
+        st.sidebar.success(f"🔄 {novas_transacoes} transações recorrentes criadas automaticamente!")
+except Exception as e:
+    st.sidebar.error(f⚠️ Erro ao processar recorrências: {e}")
+
+categorias, formas = ler_categorias_formas()
+
+menu = st.sidebar.radio("Menu", ["Novo Registro", "Consultar Finanças", "Gerenciar Transações", "Configurações"])
+
+# --- CONFIGURAÇÕES ---
+if menu == "Configurações":
+    st.header("⚙️ Configurações")
+    
+    dia_fatura = st.number_input("Dia de vencimento da fatura (1-31)", 
+                                min_value=1, max_value=31, 
+                                value=int(config.get("dia_fatura", 10)),
+                                help="Dia que a fatura vence (normalmente dia 10)")
+    
+    if st.button("Salvar configuração"):
+        config["dia_fatura"] = int(dia_fatura)
+        save_config(config)
+        st.success(f"✅ Configuração salva: Fatura dia {dia_fatura}")
+    
+    # Calcular exemplos
+    hoje = date.today()
+    
+    st.info(f"""
+    **📋 REGRA DO CARTÃO DE CRÉDITO:**
+    - **Compras em qualquer dia do mês → Fatura no dia {dia_fatura:02d} do PRÓXIMO mês**
+    
+    **Exemplos:**
+    - Compra em 15/11 → Fatura em {dia_fatura:02d}/12
+    - Compra em 20/12 → Fatura em {dia_fatura:02d}/01
+    """)
+
+# --- NOVO REGISTRO ---
+elif menu == "Novo Registro":
+    st.header("➕ Novo Registro")
+    
+    # Inicializar estado para mensagem de sucesso
+    if 'success_message' not in st.session_state:
+        st.session_state.success_message = None
+    
+    # Se há mensagem de sucesso, mostrá-la e depois limpar
+    if st.session_state.success_message:
+        st.success(st.session_state.success_message)
+        st.session_state.success_message = None
+    
+    # Formulário principal
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        tipo = st.radio("Tipo", ["Receita", "Despesa"], index=1, horizontal=True, key="novo_tipo")
+        descricao = st.text_input("Descrição", value="", key="novo_descricao")
+        valor = st.number_input("Valor (R$)", min_value=0.01, value=0.01, format="%.2f", step=0.01, key="novo_valor")
+        categoria = st.selectbox("Categoria", categorias, key="novo_categoria")
+    
+    with col2:
+        forma = st.selectbox("Forma de pagamento", formas, key="novo_forma")
+        
+        # Verificar se é cartão de crédito
+        no_cartao = forma.lower() in ["crédito", "credito", "cartão", "cartao"]
+        
+        # Data do Registro (quando está registrando)
+        st.markdown("**Data do Registro**")
+        st.info("Data em que você está registrando esta transação no sistema")
+        data_registro = st.date_input("", value=date.today(), key="data_registro", label_visibility="collapsed")
+        
+        # Data do Pagamento
+        st.markdown("**Data do Pagamento**")
+        
+        if no_cartao:
+            # Para crédito: mostrar data da compra e calcular data da fatura
+            st.info("Data em que a compra foi realizada no cartão")
+            data_compra = st.date_input("", value=date.today(), key="data_compra", label_visibility="collapsed")
+            
+            # Calcular data da fatura automaticamente
+            data_pagamento = ajustar_para_fatura(data_compra, dia_fatura=config.get("dia_fatura", 10))
+            
+            st.success(f"**Fatura:** {data_pagamento.strftime('%d/%m/%Y')}")
+            st.info(f"Compra: {data_compra.strftime('%d/%m/%Y')} → Fatura: {data_pagamento.strftime('%d/%m/%Y')}")
+        else:
+            # Para outras formas: data do pagamento é editável
+            st.info("Data em que o pagamento foi/será realizado (pode ser futura)")
+            data_pagamento = st.date_input("", value=date.today(), key="data_pagamento", label_visibility="collapsed")
+    
+    # Mostrar resumo
+    st.markdown("---")
+    st.subheader("📋 Resumo da Transação")
+    
+    col_res1, col_res2 = st.columns(2)
+    
+    with col_res1:
+        st.info(f"""
+        **Informações:**
+        - **Tipo:** {tipo}
+        - **Descrição:** {descricao}
+        - **Valor:** R$ {valor:,.2f}
+        - **Categoria:** {categoria}
+        """)
+    
+    with col_res2:
+        if no_cartao:
+            st.info(f"""
+            **Datas (Crédito):**
+            - **Registro:** {data_registro.strftime('%d/%m/%Y')}
+            - **Compra:** {data_compra.strftime('%d/%m/%Y')}
+            - **Pagamento (Fatura):** {data_pagamento.strftime('%d/%m/%Y')}
+            """)
+        else:
+            st.info(f"""
+            **Datas:**
+            - **Registro:** {data_registro.strftime('%d/%m/%Y')}
+            - **Pagamento:** {data_pagamento.strftime('%d/%m/%Y')}
+            """)
+    
+    st.markdown("---")
+    st.subheader("🔁 Opções de Pagamento")
+    
+    opcao_pagamento = st.radio("Selecione o tipo:", 
+                              ["À Vista", "Parcelado", "Recorrente"],
+                              horizontal=True,
+                              index=0,
+                              key="novo_opcao")
+    
+    parcelas = 1
+    if opcao_pagamento == "Parcelado":
+        parcelas = st.number_input("Número de parcelas", min_value=2, max_value=24, value=2, key="novo_parcelas")
+        valor_parcela = valor / parcelas
+        st.info(f"💸 **Valor por parcela:** R$ {valor_parcela:,.2f}")
+    
+    elif opcao_pagamento == "Recorrente":
+        st.info("🔄 **Recorrente:** Será cobrada automaticamente todo mês")
+        # Para recorrente, usar dia da data de pagamento
+        if no_cartao:
+            dia_fixo = data_compra.day
+        else:
+            dia_fixo = data_pagamento.day
+        st.info(f"📅 **Dia fixo:** {dia_fixo}º dia do mês")
+    
+    # Container para o botão
+    submit_container = st.container()
+    
+    with submit_container:
+        if st.button("💾 Salvar Registro", type="primary", key="novo_salvar"):
+            erros = validar_transacao(data_registro, data_pagamento, descricao, valor, categoria)
+            if erros:
+                for erro in erros:
+                    st.error(f"❌ {erro}")
+            else:
+                try:
+                    mensagem = ""
+                    
+                    if opcao_pagamento == "Parcelado":
+                        # Parcelado: criar múltiplos registros
+                        valor_parcela = valor / parcelas
+                        
+                        for i in range(parcelas):
+                            # Calcular data de cada parcela
+                            if no_cartao:
+                                # Para crédito: cada parcela tem sua própria data de compra
+                                ano_compra = data_compra.year + (data_compra.month + i - 1) // 12
+                                mes_compra = (data_compra.month + i - 1) % 12 + 1
+                                dia_compra = min(data_compra.day, calendar.monthrange(ano_compra, mes_compra)[1])
+                                data_compra_parcela = date(ano_compra, mes_compra, dia_compra)
+                                data_pagamento_parcela = ajustar_para_fatura(data_compra_parcela, dia_fatura=config.get("dia_fatura", 10))
+                            else:
+                                # Para outras formas: parcelas no mesmo dia do mês
+                                ano_pag = data_pagamento.year + (data_pagamento.month + i - 1) // 12
+                                mes_pag = (data_pagamento.month + i - 1) % 12 + 1
+                                dia_pag = min(data_pagamento.day, calendar.monthrange(ano_pag, mes_pag)[1])
+                                data_pagamento_parcela = date(ano_pag, mes_pag, dia_pag)
+                            
+                            desc_parcela = f"{descricao} ({i+1}/{parcelas})"
+                            
+                            extra_fields = {
+                                "no_cartao": 1 if no_cartao else 0,
+                                "parcelas": parcelas,
+                                "parcela_atual": i + 1
+                            }
+                            
+                            inserir_transacao(tipo, data_registro, data_pagamento_parcela, 
+                                            desc_parcela, valor_parcela, categoria, forma, extra_fields)
+                        
+                        mensagem = f"✅ {parcelas} parcelas de R$ {valor_parcela:,.2f} registradas com sucesso!"
+                    
+                    elif opcao_pagamento == "Recorrente":
+                        # Recorrente: criar 1 registro com flag de recorrência
+                        extra_fields = {
+                            "recorrente": 1,
+                            "dia_fixo": dia_fixo,
+                            "no_cartao": 1 if no_cartao else 0
+                        }
+                        
+                        inserir_transacao(tipo, data_registro, data_pagamento, 
+                                        descricao, valor, categoria, forma, extra_fields)
+                        mensagem = "✅ Transação recorrente registrada com sucesso!"
+                        st.info("🔄 As recorrências futuras serão criadas automaticamente!")
+                    
+                    else:
+                        # À vista: criar 1 registro normal
+                        extra_fields = {
+                            "no_cartao": 1 if no_cartao else 0
+                        }
+                        
+                        inserir_transacao(tipo, data_registro, data_pagamento, 
+                                        descricao, valor, categoria, forma, extra_fields)
+                        mensagem = f"✅ {tipo} registrada com sucesso!"
+                    
+                    # Armazenar mensagem de sucesso
+                    st.session_state.success_message = mensagem
+                    st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"❌ Erro ao salvar: {str(e)}")
+    
+    st.markdown("---")
+    st.info("📋 Para visualizar ou editar transações, vá para **'Gerenciar Transações'** no menu lateral.")
+
+# --- GERENCIAR TRANSAÇÕES ---
+elif menu == "Gerenciar Transações":
+    st.header("🛠️ Gerenciar Transações")
+    
+    # Inicializar estado de edição
+    if 'editando_id' not in st.session_state:
+        st.session_state.editando_id = None
+        st.session_state.editando_dados = {}
+    
+    # Carregar transações ativas
+    df = carregar_transacoes()
+    
+    # Verificar se existe coluna status e filtrar
+    if 'status' in df.columns:
+        df_ativas = df[df['status'] != 'Excluída']
+    else:
+        df_ativas = df
+    
+    if df_ativas.empty:
+        st.info("📝 Nenhuma transação cadastrada ainda.")
+    else:
+        # Filtros para busca
+        col1, col2 = st.columns(2)
+        with col1:
+            busca_descricao = st.text_input("🔍 Buscar por descrição", key="busca_descricao")
+        with col2:
+            categoria_filtro = st.selectbox("Filtrar por categoria", ["Todas"] + categorias, key="filtro_categoria")
+        
+        # Aplicar filtros
+        df_filtrado = df_ativas.copy()
+        if busca_descricao:
+            df_filtrado = df_filtrado[df_filtrado['descricao'].str.contains(busca_descricao, case=False, na=False)]
+        if categoria_filtro != "Todas":
+            df_filtrado = df_filtrado[df_filtrado['categoria'] == categoria_filtro]
+        
+        if df_filtrado.empty:
+            st.warning("🔍 Nenhuma transação encontrada com os filtros selecionados.")
+        else:
+            st.subheader(f"📋 Transações Encontradas ({len(df_filtrado)})")
+            
+            # Se estamos editando uma transação, mostrar formulário de edição
+            if st.session_state.editando_id is not None:
+                transacao_editar = df_filtrado[df_filtrado['id'] == st.session_state.editando_id]
+                
+                if not transacao_editar.empty:
+                    transacao = transacao_editar.iloc[0]
+                    
+                    st.subheader(f"✏️ Editando: {transacao['descricao']}")
+                    
+                    # Inicializar dados de edição se ainda não existirem
+                    if not st.session_state.editando_dados:
+                        # Garantir que as datas estão no formato correto
+                        date_fields = ['data_registro', 'data_pagamento']
+                        for field in date_fields:
+                            if field in transacao:
+                                valor_campo = transacao[field]
+                                # Se for Timestamp do pandas, converter para date
+                                if isinstance(valor_campo, pd.Timestamp):
+                                    st.session_state.editando_dados[field] = valor_campo.date()
+                                elif isinstance(valor_campo, datetime):
+                                    st.session_state.editando_dados[field] = valor_campo.date()
+                                elif isinstance(valor_campo, date):
+                                    st.session_state.editando_dados[field] = valor_campo
+                                elif isinstance(valor_campo, str):
+                                    try:
+                                        st.session_state.editando_dados[field] = datetime.strptime(valor_campo, '%Y-%m-%d').date()
+                                    except:
+                                        st.session_state.editando_dados[field] = date.today()
+                                else:
+                                    st.session_state.editando_dados[field] = date.today()
+                            else:
+                                st.session_state.editando_dados[field] = date.today()
+                        
+                        st.session_state.editando_dados.update({
+                            'descricao': transacao['descricao'],
+                            'valor': float(transacao['valor']),
+                            'categoria': transacao['categoria'],
+                            'forma_pagamento': transacao['forma_pagamento'],
+                            'tipo': transacao['tipo'],
+                            'no_cartao': transacao.get('no_cartao', 0)
+                        })
+                    
+                    # Formulário de edição
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        nova_descricao = st.text_input(
+                            "Descrição", 
+                            value=st.session_state.editando_dados['descricao'],
+                            key=f"edit_desc_{transacao['id']}"
+                        )
+                        
+                        novo_valor = st.number_input(
+                            "Valor (R$)", 
+                            value=st.session_state.editando_dados['valor'],
+                            min_value=0.01, 
+                            format="%.2f",
+                            key=f"edit_valor_{transacao['id']}"
+                        )
+                        
+                        cat_index = 0
+                        if st.session_state.editando_dados['categoria'] in categorias:
+                            cat_index = categorias.index(st.session_state.editando_dados['categoria'])
+                        nova_categoria = st.selectbox(
+                            "Categoria", 
+                            categorias, 
+                            index=cat_index,
+                            key=f"edit_cat_{transacao['id']}"
+                        )
+                    
+                    with col2:
+                        # Datas
+                        nova_data_registro = st.date_input(
+                            "Data de Registro", 
+                            value=st.session_state.editando_dados.get('data_registro', date.today()),
+                            key=f"edit_data_reg_{transacao['id']}"
+                        )
+                        
+                        nova_data_pagamento = st.date_input(
+                            "Data de Pagamento", 
+                            value=st.session_state.editando_dados.get('data_pagamento', date.today()),
+                            key=f"edit_data_pag_{transacao['id']}"
+                        )
+                        
+                        forma_index = 0
+                        if st.session_state.editando_dados['forma_pagamento'] in formas:
+                            forma_index = formas.index(st.session_state.editando_dados['forma_pagamento'])
+                        nova_forma = st.selectbox(
+                            "Forma de Pagamento", 
+                            formas, 
+                            index=forma_index,
+                            key=f"edit_forma_{transacao['id']}"
+                        )
+                        
+                        tipo_index = 0 if st.session_state.editando_dados['tipo'] == "Receita" else 1
+                        novo_tipo = st.radio(
+                            "Tipo", 
+                            ["Receita", "Despesa"], 
+                            index=tipo_index,
+                            horizontal=True,
+                            key=f"edit_tipo_{transacao['id']}"
+                        )
+                    
+                    # Botões de ação
+                    col_salvar, col_cancelar, col_espaco = st.columns([1, 1, 2])
+                    
+                    with col_salvar:
+                        if st.button("💾 Salvar Alterações", key=f"save_{transacao['id']}"):
+                            erros = []
+                            if not nova_descricao or nova_descricao.strip() == "":
+                                erros.append("Descrição não pode estar vazia")
+                            if novo_valor <= 0:
+                                erros.append("Valor deve ser maior que zero")
+                            
+                            if erros:
+                                for erro in erros:
+                                    st.error(f"❌ {erro}")
+                            else:
+                                dados_atualizados = {
+                                    'descricao': str(nova_descricao),
+                                    'valor': float(novo_valor),
+                                    'categoria': str(nova_categoria),
+                                    'data_registro': nova_data_registro,
+                                    'data_pagamento': nova_data_pagamento,
+                                    'forma_pagamento': str(nova_forma),
+                                    'tipo': str(novo_tipo)
+                                }
+                                
+                                sucesso, mensagem = editar_transacao(transacao['id'], dados_atualizados)
+                                if sucesso:
+                                    st.success(f"✅ {mensagem}")
+                                    st.session_state.editando_id = None
+                                    st.session_state.editando_dados = {}
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {mensagem}")
+                    
+                    with col_cancelar:
+                        if st.button("❌ Cancelar", key=f"cancel_{transacao['id']}"):
+                            st.session_state.editando_id = None
+                            st.session_state.editando_dados = {}
+                            st.rerun()
+                    
+                    if st.button("⬅️ Voltar para a lista", key=f"back_{transacao['id']}"):
+                        st.session_state.editando_id = None
+                        st.session_state.editando_dados = {}
+                        st.rerun()
+            
+            # Se não estamos editando, mostrar a lista normal
+            else:
+                # Exibir cada transação com opções
+                for idx, transacao in df_filtrado.iterrows():
+                    # Formatar datas para exibição - CORREÇÃO AQUI
+                    data_registro = transacao.get('data_registro')
+                    data_pagamento = transacao.get('data_pagamento')
+                    
+                    # Inicializar strings vazias
+                    data_registro_str = ''
+                    data_pagamento_str = ''
+                    
+                    # Formatar data_registro
+                    if isinstance(data_registro, (date, datetime, pd.Timestamp)):
+                        if pd.notna(data_registro):  # Verificar se não é NaN/NaT
+                            if isinstance(data_registro, pd.Timestamp):
+                                data_registro_str = data_registro.strftime('%d/%m/%Y')
+                            elif isinstance(data_registro, (date, datetime)):
+                                data_registro_str = data_registro.strftime('%d/%m/%Y')
+                    elif data_registro is not None:
+                        data_registro_str = str(data_registro)
+                    
+                    # Formatar data_pagamento
+                    if isinstance(data_pagamento, (date, datetime, pd.Timestamp)):
+                        if pd.notna(data_pagamento):  # Verificar se não é NaN/NaT
+                            if isinstance(data_pagamento, pd.Timestamp):
+                                data_pagamento_str = data_pagamento.strftime('%d/%m/%Y')
+                            elif isinstance(data_pagamento, (date, datetime)):
+                                data_pagamento_str = data_pagamento.strftime('%d/%m/%Y')
+                    elif data_pagamento is not None:
+                        data_pagamento_str = str(data_pagamento)
+                    
+                    # Determinar se é crédito
+                    is_credito = transacao.get('no_cartao', 0) == 1 or 'crédito' in str(transacao.get('forma_pagamento', '')).lower()
+                    
+                    with st.expander(f"{transacao['descricao']} - R$ {transacao['valor']:,.2f} (Pagamento: {data_pagamento_str})"):
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        
+                        with col1:
+                            st.write(f"**ID:** {transacao['id']}")
+                            st.write(f"**Registro:** {data_registro_str}")
+                            st.write(f"**Pagamento:** {data_pagamento_str}")
+                            if is_credito:
+                                st.write("💳 **Cartão de Crédito**")
+                            st.write(f"**Categoria:** {transacao['categoria']}")
+                            st.write(f"**Tipo:** {transacao['tipo']}")
+                            st.write(f"**Forma:** {transacao['forma_pagamento']}")
+                            if transacao.get('parcelas', 1) > 1:
+                                st.write(f"**Parcela:** {transacao.get('parcela_atual', 1)}/{transacao.get('parcelas', 1)}")
+                            if transacao.get('recorrente', 0) == 1:
+                                st.write("🔄 **Recorrente**")
+                        
+                        with col2:
+                            if st.button("✏️ Editar", key=f"edit_btn_{transacao['id']}"):
+                                st.session_state.editando_id = transacao['id']
+                                st.session_state.editando_dados = {}
+                                st.rerun()
+                        
+                        with col3:
+                            if st.button("🗑️ Excluir", key=f"del_btn_{transacao['id']}"):
+                                if excluir_transacao(transacao['id']):
+                                    st.success("✅ Transação marcada como excluída!")
+                                    st.rerun()
+
+# --- CONSULTAR FINANÇAS ---
+elif menu == "Consultar Finanças":
+    st.header("📊 Consultar Finanças")
+    
+    df = carregar_transacoes()
+    
+    # Filtrar apenas transações ativas
+    if 'status' in df.columns:
+        df = df[df['status'] != 'Excluída']
+    
+    if df.empty:
+        st.info("📝 Nenhuma transação cadastrada ainda.")
+    else:
+        # Garantir que as colunas de data estão no formato datetime
+        date_columns = ['data_registro', 'data_pagamento']
+        for col in date_columns:
+            if col in df.columns and not df.empty:
+                if not pd.api.types.is_datetime64_any_dtype(df[col]):
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+        
+        # Data atual para padrão
+        hoje = datetime.now()
+        mes_atual = hoje.month
+        ano_atual = hoje.year
+        
+        # Filtro de intervalo de datas
+        st.subheader("📅 Filtros de Data")
+        filtro_tipo = st.radio(
+            "Filtrar por:",
+            ["Data de Pagamento", "Data de Registro"],
+            horizontal=True
+        )
+        
+        col_filtro_data = st.columns(2)
+        
+        # Escolher a coluna base para filtro
+        coluna_filtro = 'data_pagamento' if filtro_tipo == "Data de Pagamento" else 'data_registro'
+        
+        with col_filtro_data[0]:
+            meses = ["Todos"] + [f"{m:02d}" for m in range(1, 13)]
+            # Ajustar índice para o mês atual (0 é "Todos")
+            mes_index = mes_atual  # Janeiro = 1, mas queremos índice 1 na lista (0 é "Todos")
+            if mes_index > 0:
+                mes_sel = st.selectbox("Mês", meses, index=mes_index)
+            else:
+                mes_sel = st.selectbox("Mês", meses, index=0)
+        
+        with col_filtro_data[1]:
+            if pd.api.types.is_datetime64_any_dtype(df[coluna_filtro]):
+                # Obter anos únicos e ordenar
+                anos_disponiveis = df[coluna_filtro].dt.year.dropna().unique()
+                anos = sorted(anos_disponiveis, reverse=True)
+                if len(anos) == 0:
+                    anos = [ano_atual]
+            else:
+                anos = [ano_atual]
+            
+            # Encontrar índice do ano atual
+            ano_index = 0
+            if str(ano_atual) in [str(a) for a in anos]:
+                ano_index = [str(a) for a in anos].index(str(ano_atual)) + 1  # +1 porque "Todos" é o primeiro
+            
+            # Criar lista de anos para o selectbox
+            anos_lista = ["Todos"] + [str(int(ano)) for ano in anos]
+            ano_sel = st.selectbox("Ano", anos_lista, index=ano_index)
+        
+        # Outros filtros
+        col3, col4 = st.columns(2)
+        with col3:
+            tipo_sel = st.selectbox("Tipo", ["Todos", "Receita", "Despesa"])
+        with col4:
+            forma_sel = st.selectbox("Forma de Pagamento", ["Todas"] + formas)
+        
+        # Aplicar filtros
+        df_filtrado = df.copy()
+        
+        # Aplicar filtro de mês
+        if mes_sel != "Todos" and pd.api.types.is_datetime64_any_dtype(df_filtrado[coluna_filtro]):
+            df_filtrado = df_filtrado[df_filtrado[coluna_filtro].dt.month == int(mes_sel)]
+        
+        # Aplicar filtro de ano
+        if ano_sel != "Todos" and pd.api.types.is_datetime64_any_dtype(df_filtrado[coluna_filtro]):
+            df_filtrado = df_filtrado[df_filtrado[coluna_filtro].dt.year == int(ano_sel)]
+        
+        if tipo_sel != "Todos":
+            df_filtrado = df_filtrado[df_filtrado['tipo'] == tipo_sel]
+        if forma_sel != "Todas":
+            df_filtrado = df_filtrado[df_filtrado['forma_pagamento'] == forma_sel]
+        
+        if df_filtrado.empty:
+            st.warning("🔍 Nenhum registro encontrado com os filtros selecionados.")
+        else:
+            # Métricas
+            total_receitas = df_filtrado[df_filtrado['tipo'] == 'Receita']['valor'].sum()
+            total_despesas = df_filtrado[df_filtrado['tipo'] == 'Despesa']['valor'].sum()
+            saldo = total_receitas - total_despesas
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("💰 Receitas", f"R$ {total_receitas:,.2f}")
+            col2.metric("💸 Despesas", f"R$ {total_despesas:,.2f}")
+            
+            cor_saldo = "normal" if saldo >= 0 else "inverse"
+            col3.metric("📊 Saldo", f"R$ {saldo:,.2f}", delta_color=cor_saldo)
+            
+            # Gráficos
+            if not df_filtrado.empty:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Gráfico por Categoria
+                    graf_categoria = df_filtrado.groupby("categoria")['valor'].sum().reset_index()
+                    if not graf_categoria.empty and len(graf_categoria) > 0:
+                        fig = px.pie(graf_categoria, names='categoria', values='valor', 
+                                    title='📈 Distribuição por Categoria')
+                        st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    # Gráfico por Forma de Pagamento
+                    graf_forma = df_filtrado.groupby("forma_pagamento")['valor'].sum().reset_index()
+                    if not graf_forma.empty and len(graf_forma) > 0:
+                        fig2 = px.pie(graf_forma, names='forma_pagamento', values='valor',
+                                     title='💳 Distribuição por Forma de Pagamento')
+                        st.plotly_chart(fig2, use_container_width=True)
+            
+            # Tabela detalhada
+            st.subheader("📋 Registros Detalhados")
+            
+            df_display = df_filtrado.copy()
+            
+            # Formatar datas para exibição - CORREÇÃO AQUI
+            for col in date_columns:
+                if col in df_display.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df_display[col]):
+                        # Usar apply com verificação de NaT
+                        df_display[col] = df_display[col].apply(
+                            lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else ''
+                        )
+                    else:
+                        df_display[col] = df_display[col].astype(str)
+            
+            # Formatar valor
+            df_display['valor'] = df_display['valor'].apply(lambda x: f"R$ {x:,.2f}")
+            
+            # Ordenar colunas
+            colunas = ['id', 'data_registro', 'data_pagamento', 'categoria', 
+                      'tipo', 'forma_pagamento', 'valor', 'descricao']
+            
+            # Adicionar colunas de parcelas se existirem
+            if 'parcelas' in df_display.columns:
+                colunas.insert(7, 'parcelas')
+                colunas.insert(8, 'parcela_atual')
+            
+            # Remover colunas que não existem no DataFrame
+            colunas_existentes = [col for col in colunas if col in df_display.columns]
+            
+            st.dataframe(df_display[colunas_existentes], use_container_width=True, height=400)

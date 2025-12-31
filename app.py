@@ -267,41 +267,38 @@ class SistemaAutenticacao:
         # 6. Migrar dados existentes
         self._migrar_dados_existentes()
     
-    def _migrar_dados_existentes(self):
-        """Migra dados existentes para a nova estrutura"""
-        conn = sqlite3.connect(self.db_file)
-        cur = conn.cursor()
+    # ---------- Migração de dados ----------
+def migrar_dados_existentes():
+    """Migra dados existentes para a nova estrutura"""
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    try:
+        # Verificar se existem transações sem usuario_id
+        cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
+        count = cur.fetchone()[0]
         
-        try:
-            # Migrar transações antigas para o usuário admin
-            cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
-            count = cur.fetchone()[0]
+        if count > 0:
+            st.warning(f"⚠️ Migrando {count} transações existentes...")
             
-            if count > 0:
-                # Obter ID do admin
-                cur.execute("SELECT id FROM usuarios WHERE username = 'admin' AND tipo = 'ADM'")
-                admin = cur.fetchone()
-                
-                if admin:
-                    admin_id = admin[0]
-                    cur.execute("""
-                        UPDATE transacoes 
-                        SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
-                        WHERE usuario_id IS NULL
-                    """, (admin_id,))
-                    conn.commit()
-                    print(f"✅ {count} transações migradas para o usuário admin")
+            # Atribuir ao primeiro usuário ADM encontrado
+            cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
+            admin_id = cur.fetchone()
             
-            # Atualizar usuários sem grupo
-            cur.execute("UPDATE usuarios SET grupo = 'padrao' WHERE grupo IS NULL")
-            cur.execute("UPDATE usuarios SET compartilhado = 1 WHERE compartilhado IS NULL")
-            
-            conn.commit()
-            
-        except Exception as e:
-            print(f"⚠️ Erro na migração: {e}")
-        finally:
-            conn.close()
+            if admin_id:
+                admin_id = admin_id[0]
+                cur.execute("""
+                    UPDATE transacoes 
+                    SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
+                    WHERE usuario_id IS NULL
+                """, (admin_id,))
+                conn.commit()
+                st.success(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
+    
+    except Exception as e:
+        st.error(f"Erro na migração: {e}")
+    finally:
+        conn.close()
     
     def _criar_admin_padrao(self):
         """Cria usuário administrador padrão se não existir"""
@@ -605,6 +602,64 @@ class SistemaAutenticacao:
             return False, f"Erro ao criar usuário: {str(e)}", None
         finally:
             conn.close()
+
+# ---------- Migração de dados ----------
+def migrar_dados_existentes():
+    """Migra dados existentes para a nova estrutura"""
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    try:
+        # Verificar se existem transações sem usuario_id
+        cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
+        count = cur.fetchone()[0]
+        
+        if count > 0:
+            st.warning(f"⚠️ Migrando {count} transações existentes...")
+            
+            # Atribuir ao primeiro usuário ADM encontrado
+            cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
+            admin_id = cur.fetchone()
+            
+            if admin_id:
+                admin_id = admin_id[0]
+                cur.execute("""
+                    UPDATE transacoes 
+                    SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
+                    WHERE usuario_id IS NULL
+                """, (admin_id,))
+                conn.commit()
+                st.success(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
+    
+    except Exception as e:
+        st.error(f"Erro na migração: {e}")
+    finally:
+        conn.close()
+
+# ---------- Inicialização Robusta do Sistema ----------
+def inicializar_sistema_completo():
+    """Inicializa todo o sistema com tratamento de erros"""
+    try:
+        # Inicializar sistema de autenticação (que já cria as tabelas)
+        auth_system = SistemaAutenticacao()
+        
+        # Garantir que tabelas existem
+        ensure_tables_exist()
+        
+        # Migrar dados existentes
+        migrar_dados_existentes()  # AGORA ESTÁ DEFINIDA ANTES!
+        
+        return auth_system
+    except Exception as e:
+        st.error(f"❌ Erro crítico na inicialização do sistema: {e}")
+        # Tentar criar um banco de dados mínimo
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            conn.close()
+        except:
+            pass
+        # Criar novo sistema mesmo com erro
+        return SistemaAutenticacao()
 
 # ---------- Inicialização Robusta do Sistema ----------
 def inicializar_sistema_completo():
@@ -1098,39 +1153,6 @@ def validar_transacao(data_registro, data_pagamento, descricao, valor, categoria
         erros.append("Categoria é obrigatória")
     
     return erros
-
-# ---------- Migração de dados ----------
-def migrar_dados_existentes():
-    """Migra dados existentes para a nova estrutura"""
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    try:
-        # Verificar se existem transações sem usuario_id
-        cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
-        count = cur.fetchone()[0]
-        
-        if count > 0:
-            st.warning(f"⚠️ Migrando {count} transações existentes...")
-            
-            # Atribuir ao primeiro usuário ADM encontrado
-            cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
-            admin_id = cur.fetchone()
-            
-            if admin_id:
-                admin_id = admin_id[0]
-                cur.execute("""
-                    UPDATE transacoes 
-                    SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
-                    WHERE usuario_id IS NULL
-                """, (admin_id,))
-                conn.commit()
-                st.success(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
-    
-    except Exception as e:
-        st.error(f"Erro na migração: {e}")
-    finally:
-        conn.close()
 
 # ---------- Gerenciamento de Sessão ----------
 if 'autenticado' not in st.session_state:

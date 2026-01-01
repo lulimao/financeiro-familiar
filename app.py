@@ -8,8 +8,41 @@ import plotly.express as px
 import calendar
 import hashlib
 import re
-import os
 import traceback
+import os
+from urllib.parse import urlparse
+
+# Detectar ambiente
+IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
+
+# Configuração do banco
+if IS_STREAMLIT_CLOUD:
+    # PostgreSQL para produção
+    import psycopg2
+    from psycopg2 import pool
+    
+    # URL do banco (será configurada no Streamlit Cloud)
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    
+    if not DATABASE_URL:
+        st.error("⚠️ DATABASE_URL não configurada no Streamlit Cloud")
+        st.stop()
+    
+    def get_conn():
+        """Conexão com PostgreSQL"""
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        return conn
+        
+else:
+    # SQLite para desenvolvimento local
+    import sqlite3
+    DB_FILE = BASE_DIR / "financeiro.db"
+    
+    def get_conn():
+        """Conexão com SQLite"""
+        return sqlite3.connect(str(DB_FILE), 
+                             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
 
 # ---------- CONFIGURAÇÃO DA PÁGINA (DEVE SER A PRIMEIRA COISA) ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")

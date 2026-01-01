@@ -4,22 +4,19 @@ WORKDIR /app
 
 # Instalar dependências do sistema
 RUN apt-get update && apt-get install -y \
-    gcc \
     sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar requirements primeiro para cache
+# Criar diretório de dados com permissões corretas
+RUN mkdir -p /app/data && chmod 777 /app/data
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar o resto do código
 COPY . .
 
-# Criar diretório para dados
-RUN mkdir -p /app/data
-
-# Expor porta
+# Expor a porta que o Render usa
 EXPOSE 10000
 
-# Comando de inicialização
-CMD ["streamlit", "run", "app.py", "--server.port=10000", "--server.address=0.0.0.0"]
+# Comando para iniciar
+CMD ["streamlit", "run", "app.py", "--server.port=10000", "--server.address=0.0.0.0", "--server.headless=true", "--browser.gatherUsageStats=false"]

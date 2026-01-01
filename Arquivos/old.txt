@@ -11,13 +11,142 @@ import re
 import os
 import traceback
 
-os.system('clear' if os.name == 'posix' else 'cls')
+# ---------- CONFIGURAÇÃO DA PÁGINA (DEVE SER A PRIMEIRA COISA) ----------
+st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
-# ---------- Configurações ----------
-DB_FILE = Path("financeiro.db")
-EXCEL_APOIO = Path("Renda_2026.xlsx")
+# ... (código anterior mantido)
+
+# ---------- Configurações para Cloud ----------
+IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
+
+if IS_STREAMLIT_CLOUD:
+    # Usar diretório temporário para arquivos no cloud
+    BASE_DIR = Path("/tmp") if os.path.exists("/tmp") else Path(".")
+else:
+    # Usar diretório local
+    BASE_DIR = Path(".")
+
+DB_FILE = BASE_DIR / "financeiro.db"
+EXCEL_APOIO = BASE_DIR / "Renda_2026.xlsx"
+CONFIG_FILE = BASE_DIR / "config.json"
 APOIO_SHEET = "Planilha apoio"
-CONFIG_FILE = Path("config.json")
+
+# Criar diretório de dados se não existir
+if not BASE_DIR.exists():
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------- Banco ----------
+import time
+
+def get_conn(max_retries=3, retry_delay=1):
+    """Obtém conexão com retry em caso de falha"""
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(
+                str(DB_FILE), 
+                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                timeout=30,  # Timeout de 30 segundos
+                check_same_thread=False  # Permite múltiplas threads
+            )
+            # Configurações para melhor performance
+            conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging
+            conn.execute("PRAGMA busy_timeout=5000")  # Timeout de 5 segundos
+            return conn
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) and attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
+                continue
+            else:
+                raise e
+
+def ensure_tables_exist():
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    # Tabela de transações
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_registro DATE,
+            data_pagamento DATE,
+            pessoa TEXT,
+            categoria TEXT,
+            tipo TEXT,
+            valor REAL,
+            descricao TEXT,
+            recorrente INTEGER DEFAULT 0,
+            dia_fixo INTEGER,
+            pessoa_responsavel TEXT DEFAULT 'Ambos',
+            no_cartao INTEGER DEFAULT 0,
+            investimento INTEGER DEFAULT 0,
+            vr INTEGER DEFAULT 0,
+            forma_pagamento TEXT DEFAULT 'Dinheiro',
+            parcelas INTEGER DEFAULT 1,
+            parcela_atual INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'Ativa',
+            usuario_id INTEGER,
+            grupo TEXT DEFAULT 'padrao',
+            compartilhado INTEGER DEFAULT 0,
+            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+        )
+    """)
+    
+    # Verificar e adicionar colunas ausentes se necessário
+    colunas_necessarias = [
+        'data_registro', 'data_pagamento', 'parcelas', 'parcela_atual', 'status',
+        'usuario_id', 'grupo', 'compartilhado'
+    ]
+    
+    for coluna in colunas_necessarias:
+        try:
+            if coluna == 'status':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'Ativa'")
+            elif coluna == 'usuario_id':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER")
+            elif coluna == 'grupo':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'padrao'")
+            elif coluna == 'compartilhado':
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 0")
+            elif coluna in ['data_registro', 'data_pagamento']:
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} DATE")
+            else:
+                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+    
+    conn.commit()
+    conn.close()
+
+# ---------- Inicialização dos arquivos no Cloud ----------
+def inicializar_arquivos_cloud():
+    """Criar arquivos necessários se não existirem no cloud"""
+    
+    # Criar config.json se não existir
+    if not CONFIG_FILE.exists():
+        config_default = {"dia_fatura": 10}
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config_default, f, indent=2)
+    
+    # Criar banco de dados se não existir
+    if not DB_FILE.exists():
+        ensure_tables_exist()  # AGORA ESTÁ DEFINIDA ANTES!
+        
+    # Criar planilha exemplo se não existir
+    if not EXCEL_APOIO.exists():
+        try:
+            df_exemplo = pd.DataFrame({
+                'Categorias': ['Alimentação', 'Moradia', 'Transporte', 'Lazer', 
+                              'Saúde', 'Educação', 'Salário', 'Outros'],
+                'Formas_Pagamento': ['Dinheiro', 'Débito', 'Crédito', 
+                                     'Transferência', 'Pix', 'Boleto']
+            })
+            df_exemplo.to_excel(EXCEL_APOIO, sheet_name='Planilha apoio', index=False)
+        except Exception as e:
+            st.warning(f"Não foi possível criar planilha exemplo: {e}")
+
+# Limpar console (apenas local)
+if not IS_STREAMLIT_CLOUD:
+    os.system('clear' if os.name == 'posix' else 'cls')
 
 # ---------- Sistema de Autenticação Melhorado ----------
 class SistemaAutenticacao:
@@ -142,33 +271,29 @@ class SistemaAutenticacao:
         cur = conn.cursor()
         
         try:
-            # Migrar transações antigas para o usuário admin
+            # Verificar se existem transações sem usuario_id
             cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
             count = cur.fetchone()[0]
             
             if count > 0:
-                # Obter ID do admin
-                cur.execute("SELECT id FROM usuarios WHERE username = 'admin' AND tipo = 'ADM'")
-                admin = cur.fetchone()
+                print(f"⚠️ Migrando {count} transações existentes...")
                 
-                if admin:
-                    admin_id = admin[0]
+                # Atribuir ao primeiro usuário ADM encontrado
+                cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
+                admin_id = cur.fetchone()
+                
+                if admin_id:
+                    admin_id = admin_id[0]
                     cur.execute("""
                         UPDATE transacoes 
                         SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
                         WHERE usuario_id IS NULL
                     """, (admin_id,))
                     conn.commit()
-                    print(f"✅ {count} transações migradas para o usuário admin")
-            
-            # Atualizar usuários sem grupo
-            cur.execute("UPDATE usuarios SET grupo = 'padrao' WHERE grupo IS NULL")
-            cur.execute("UPDATE usuarios SET compartilhado = 1 WHERE compartilhado IS NULL")
-            
-            conn.commit()
-            
+                    print(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
+        
         except Exception as e:
-            print(f"⚠️ Erro na migração: {e}")
+            print(f"Erro na migração: {e}")
         finally:
             conn.close()
     
@@ -434,8 +559,85 @@ class SistemaAutenticacao:
         finally:
             conn.close()
 
-# ---------- Instanciar sistema de autenticação ----------
-auth = SistemaAutenticacao()
+    def criar_usuario(self, username, senha, tipo="COMUM", nome=None, email=None, grupo="padrao", compartilhado=0):
+        """Cria um novo usuário no sistema"""
+        conn = sqlite3.connect(self.db_file)
+        cur = conn.cursor()
+        
+        try:
+            # Validar força da senha
+            valido, mensagem = self.validar_senha(senha)
+            if not valido:
+                return False, mensagem, None
+            
+            # Verificar se usuário já existe
+            cur.execute("SELECT COUNT(*) FROM usuarios WHERE username = ?", (username,))
+            if cur.fetchone()[0] > 0:
+                return False, "Usuário já existe", None
+            
+            # Criar hash da senha
+            senha_hash = self._hash_senha(senha)
+            
+            # Inserir novo usuário
+            cur.execute("""
+                INSERT INTO usuarios (username, senha_hash, tipo, nome, email, grupo, compartilhado)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (username, senha_hash, tipo, nome, email, grupo, compartilhado))
+            
+            usuario_id = cur.lastrowid
+            
+            # Log
+            cur.execute("""
+                INSERT INTO logs_acesso (usuario_id, acao, descricao)
+                VALUES (?, 'CRIACAO_USUARIO', 'Novo usuário criado: ' || ?)
+            """, (usuario_id, username))
+            
+            conn.commit()
+            return True, "Usuário criado com sucesso", usuario_id
+            
+        except Exception as e:
+            return False, f"Erro ao criar usuário: {str(e)}", None
+        finally:
+            conn.close()
+
+# ---------- Inicialização Robusta do Sistema ----------
+def inicializar_sistema_completo():
+    """Inicializa todo o sistema com tratamento de erros"""
+    try:
+        # Inicializar sistema de autenticação (que já cria as tabelas)
+        auth_system = SistemaAutenticacao()
+        
+        # Garantir que tabelas existem (redundante, mas seguro)
+        ensure_tables_exist()
+        
+        # A migração já é feita no __init__ do SistemaAutenticacao
+        # Não precisa chamar migrar_dados_existentes() novamente
+        
+        return auth_system
+    except Exception as e:
+        st.error(f"❌ Erro crítico na inicialização do sistema: {e}")
+        # Tentar criar um banco de dados mínimo
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            conn.close()
+        except:
+            pass
+        # Criar novo sistema mesmo com erro
+        return SistemaAutenticacao()
+
+# Inicializar auth como None primeiro
+auth = None
+
+try:
+    auth = inicializar_sistema_completo()
+except Exception as e:
+    st.error(f"⚠️ Erro ao inicializar: {e}. Tentando continuar...")
+    try:
+        auth = SistemaAutenticacao()
+    except Exception as e2:
+        st.error(f"❌ Erro crítico: Não foi possível inicializar o sistema: {e2}")
+        # Forçar criação de uma instância básica
+        auth = None
 
 # ---------- Funções auxiliares ----------
 def load_config():
@@ -461,9 +663,28 @@ def ajustar_para_fatura(data_compra, dia_fatura=10):
         return date(data_compra.year, data_compra.month + 1, dia_fatura)
 
 # ---------- Banco ----------
-def get_conn():
-    conn = sqlite3.connect(str(DB_FILE), detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
-    return conn
+import time
+
+def get_conn(max_retries=3, retry_delay=1):
+    """Obtém conexão com retry em caso de falha"""
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(
+                str(DB_FILE), 
+                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                timeout=30,  # Timeout de 30 segundos
+                check_same_thread=False  # Permite múltiplas threads
+            )
+            # Configurações para melhor performance
+            conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging
+            conn.execute("PRAGMA busy_timeout=5000")  # Timeout de 5 segundos
+            return conn
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) and attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
+                continue
+            else:
+                raise e
 
 def ensure_tables_exist():
     conn = get_conn()
@@ -871,42 +1092,6 @@ def validar_transacao(data_registro, data_pagamento, descricao, valor, categoria
     
     return erros
 
-# ---------- Migração de dados ----------
-def migrar_dados_existentes():
-    """Migra dados existentes para a nova estrutura"""
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    try:
-        # Verificar se existem transações sem usuario_id
-        cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
-        count = cur.fetchone()[0]
-        
-        if count > 0:
-            st.warning(f"⚠️ Migrando {count} transações existentes...")
-            
-            # Atribuir ao primeiro usuário ADM encontrado
-            cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
-            admin_id = cur.fetchone()
-            
-            if admin_id:
-                admin_id = admin_id[0]
-                cur.execute("""
-                    UPDATE transacoes 
-                    SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
-                    WHERE usuario_id IS NULL
-                """, (admin_id,))
-                conn.commit()
-                st.success(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
-    
-    except Exception as e:
-        st.error(f"Erro na migração: {e}")
-    finally:
-        conn.close()
-
-# ---------- Interface Streamlit ----------
-st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
-
 # ---------- Gerenciamento de Sessão ----------
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
@@ -931,6 +1116,13 @@ def pagina_login():
     with col2:
         with st.container():
             st.markdown("### Acesse sua conta")
+            
+            # Verificar se auth está inicializado
+            if auth is None:
+                st.error("❌ Sistema não inicializado. Recarregue a página.")
+                if st.button("🔄 Recarregar"):
+                    st.rerun()
+                return
             
             # Mensagem informativa
             with st.expander("ℹ️ Informações de acesso"):
@@ -1007,6 +1199,14 @@ def pagina_alterar_senha():
         with st.container():
             st.markdown("### Redefinir Senha")
             
+            # Verificar se auth está inicializado
+            if auth is None:
+                st.error("❌ Sistema não inicializado. Volte para o login.")
+                if st.button("↩️ Voltar para Login"):
+                    st.session_state.pagina_atual = "login"
+                    st.rerun()
+                return
+            
             username = st.text_input("Usuário", key="alterar_username")
             senha_atual = st.text_input("Senha Atual", type="password", key="alterar_senha_atual")
             nova_senha = st.text_input("Nova Senha", type="password", key="alterar_nova_senha")
@@ -1057,6 +1257,14 @@ def pagina_recuperar_senha():
         with st.container():
             st.markdown("### Redefinir Senha")
             
+            # Verificar se auth está inicializado
+            if auth is None:
+                st.error("❌ Sistema não inicializado. Volte para o login.")
+                if st.button("↩️ Voltar para Login"):
+                    st.session_state.pagina_atual = "login"
+                    st.rerun()
+                return
+            
             username = st.text_input("Usuário", key="recuperar_username")
             senha_atual = st.text_input("Senha Atual", type="password", key="recuperar_senha_atual")
             nova_senha = st.text_input("Nova Senha", type="password", key="recuperar_nova_senha")
@@ -1082,6 +1290,18 @@ def pagina_recuperar_senha():
 
 # ---------- Página Principal ----------
 def pagina_principal():
+    # Verificar se auth está inicializado
+    if auth is None:
+        st.error("❌ Sistema não inicializado. Faça login novamente.")
+        if st.button("🚪 Voltar para Login"):
+            st.session_state.autenticado = False
+            st.session_state.usuario = None
+            st.session_state.tipo_usuario = None
+            st.session_state.usuario_id = None
+            st.session_state.pagina_atual = "login"
+            st.rerun()
+        return
+    
     # Barra lateral com informações do usuário
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.usuario}")
@@ -1695,6 +1915,11 @@ def pagina_gerenciar_usuarios():
         st.error("❌ Acesso restrito a administradores.")
         return
     
+    # Verificar se auth está inicializado
+    if auth is None:
+        st.error("❌ Sistema não inicializado.")
+        return
+    
     tab1, tab2 = st.tabs(["📋 Lista de Usuários", "➕ Criar Novo Usuário"])
     
     with tab1:
@@ -1843,6 +2068,11 @@ def pagina_gerenciar_usuarios():
 def pagina_minha_conta():
     st.header("🔧 Minha Conta")
     
+    # Verificar se auth está inicializado
+    if auth is None:
+        st.error("❌ Sistema não inicializado.")
+        return
+    
     col1, col2 = st.columns([1, 2])
     
     with col1:
@@ -1962,16 +2192,50 @@ def pagina_configuracoes():
 
 # ---------- Roteamento Principal ----------
 def main():
-    # Inicializar banco de dados
-    auth._verificar_e_atualizar_estrutura_banco()
-    
-    if not st.session_state.autenticado:
-        if st.session_state.pagina_atual == "login":
-            pagina_login()
-        elif st.session_state.pagina_atual == "alterar_senha":
-            pagina_alterar_senha()
-    else:
-        pagina_principal()
+    try:
+        # ---------- Inicialização ----------
+        if IS_STREAMLIT_CLOUD:
+            inicializar_arquivos_cloud()
+        
+        # Verificar se auth foi inicializado
+        global auth
+        if auth is None:
+            st.error("❌ Falha crítica: Sistema de autenticação não inicializado.")
+            st.info("Recarregue a página ou verifique os logs para mais detalhes.")
+            return
+        
+        # Inicializar banco de dados
+        try:
+            auth._verificar_e_atualizar_estrutura_banco()
+        except Exception as e:
+            st.warning(f"⚠️ Aviso ao inicializar banco: {e}")
+        
+        if not st.session_state.autenticado:
+            if st.session_state.pagina_atual == "login":
+                pagina_login()
+            elif st.session_state.pagina_atual == "alterar_senha":
+                pagina_alterar_senha()
+        else:
+            pagina_principal()
+            
+    except Exception as e:
+        st.error(f"❌ Erro crítico no aplicativo: {e}")
+        
+        # Mostrar botão de emergência
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Tentar Reiniciar"):
+                # Limpar caches e estado
+                try:
+                    st.cache_data.clear()
+                    st.session_state.clear()
+                except:
+                    pass
+                st.rerun()
+        
+        with col2:
+            if st.button("📋 Ver Detalhes do Erro"):
+                st.code(traceback.format_exc())
 
 if __name__ == "__main__":
     main()

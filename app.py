@@ -1066,7 +1066,9 @@ def editar_transacao(transacao_id, novos_dados, usuario_id=None):
         conn.close()
 
 def ler_categorias_formas():
-    categorias_default = ["Alimentação", "Moradia", "Transporte", "Lazer", "Saúde", "Educação", "Salário", "Outros"]
+    categorias_default = ["Alimentação", "Aluguel", "Bebidas", "Estética", "Cabeleireiro", "Calçados", "Combustível", "Contas", "Delivery", "Educação", "Emergenciais", "Entretenimento", "Estacionamento",
+                          "Estudos", "Fatura", "Gasolina", "Imprevistos", "Hobbies", "Impostos", "Internet", "Investimento", "Jogos", "Lazer", "Luz", "Mercado", "Moradia", "Narguile", "Outros", "Pessoal",
+                          "Pet", "Presentes", "Rendimentos", "Roupas", "Salario", "Saúde", "Serviços", "Streaming", "Supermercado", "Transporte", "Viagens"]
     formas_default = ["Dinheiro", "Débito", "Crédito", "Transferência", "Pix", "Boleto"]
     if not EXCEL_APOIO.exists():
         return categorias_default, formas_default
@@ -1126,11 +1128,7 @@ def pagina_login():
             
             # Mensagem informativa
             with st.expander("ℹ️ Informações de acesso"):
-                st.info("""
-                **Primeiro acesso?**
-                - **Usuário:** admin
-                - **Senha:** admin123
-                
+                st.info("""                
                 **⚠️ Importante:**
                 1. Altere a senha padrão após o primeiro acesso
                 2. A senha deve ter pelo menos 8 caracteres
@@ -1175,20 +1173,11 @@ def pagina_login():
                     st.info("""
                     **Problemas de acesso?**
                     - Verifique se o usuário está correto
-                    - Use a opção 'Alterar Senha' se esqueceu
+                    - Use a opção 'Alterar Senha'
                     - Contate o administrador do sistema
                     """)
             
             st.markdown("---")
-            
-            # Credenciais padrão em destaque
-            st.warning("""
-            **Credenciais padrão para primeiro acesso:**
-            - **Usuário:** admin
-            - **Senha:** admin123
-            
-            ⚠️ **ALTERE A SENHA APÓS O PRIMEIRO ACESSO!**
-            """)
 
 def pagina_alterar_senha():
     st.title("🔑 Alterar Senha")

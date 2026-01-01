@@ -8,57 +8,30 @@ import plotly.express as px
 import calendar
 import hashlib
 import re
-import traceback
 import os
-from urllib.parse import urlparse
+import traceback
 
-# Detectar ambiente
-IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
-
-# Configuração do banco
-if IS_STREAMLIT_CLOUD:
-    # PostgreSQL para produção
-    import psycopg2
-    from psycopg2 import pool
-    
-    # URL do banco (será configurada no Streamlit Cloud)
-    DATABASE_URL = os.environ.get('DATABASE_URL')
-    
-    if not DATABASE_URL:
-        st.error("⚠️ DATABASE_URL não configurada no Streamlit Cloud")
-        st.stop()
-    
-    def get_conn():
-        """Conexão com PostgreSQL"""
-        import psycopg2
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        return conn
-        
-else:
-    # SQLite para desenvolvimento local
-    import sqlite3
-    DB_FILE = BASE_DIR / "financeiro.db"
-    
-    def get_conn():
-        """Conexão com SQLite"""
-        return sqlite3.connect(str(DB_FILE), 
-                             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
-
-# ---------- CONFIGURAÇÃO DA PÁGINA (DEVE SER A PRIMEIRA COISA) ----------
+# ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
-# ... (código anterior mantido)
-
-# ---------- Configurações para Cloud ----------
+# ---------- DETECTAR AMBIENTE ----------
 IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
+IS_RENDER = os.environ.get('RENDER') == 'true'
 
-if IS_STREAMLIT_CLOUD:
-    # Usar diretório temporário para arquivos no cloud
+if IS_RENDER:
+    # Render.com com disco persistente
+    BASE_DIR = Path("/app/data")
+    print("✅ Ambiente: Render.com (disco persistente ativado)")
+elif IS_STREAMLIT_CLOUD:
+    # Streamlit Cloud (temporário)
     BASE_DIR = Path("/tmp") if os.path.exists("/tmp") else Path(".")
+    print("⚠️ Ambiente: Streamlit Cloud (dados temporários)")
 else:
-    # Usar diretório local
+    # Desenvolvimento local
     BASE_DIR = Path(".")
+    print("💻 Ambiente: Desenvolvimento local")
 
+# Caminhos dos arquivos
 DB_FILE = BASE_DIR / "financeiro.db"
 EXCEL_APOIO = BASE_DIR / "Renda_2026.xlsx"
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -67,6 +40,7 @@ APOIO_SHEET = "Planilha apoio"
 # Criar diretório de dados se não existir
 if not BASE_DIR.exists():
     BASE_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Diretório criado: {BASE_DIR}")
 
 # ---------- Banco ----------
 import time
@@ -76,18 +50,18 @@ def get_conn(max_retries=3, retry_delay=1):
     for attempt in range(max_retries):
         try:
             conn = sqlite3.connect(
-                str(DB_FILE), 
+                str(DB_FILE),  # AGORA DB_FILE está definido
                 detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-                timeout=30,  # Timeout de 30 segundos
-                check_same_thread=False  # Permite múltiplas threads
+                timeout=30,
+                check_same_thread=False
             )
             # Configurações para melhor performance
-            conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging
-            conn.execute("PRAGMA busy_timeout=5000")  # Timeout de 5 segundos
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             return conn
         except sqlite3.OperationalError as e:
             if "locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
+                time.sleep(retry_delay * (attempt + 1))
                 continue
             else:
                 raise e
@@ -177,9 +151,11 @@ def inicializar_arquivos_cloud():
         except Exception as e:
             st.warning(f"Não foi possível criar planilha exemplo: {e}")
 
-# Limpar console (apenas local)
-if not IS_STREAMLIT_CLOUD:
-    os.system('clear' if os.name == 'posix' else 'cls')
+print("=" * 50)
+print(f"Sistema Financeiro Familiar")
+print(f"Ambiente: {'Render.com' if IS_RENDER else 'Streamlit Cloud' if IS_STREAMLIT_CLOUD else 'Local'}")
+print(f"Banco de dados: {DB_FILE}")
+print("=" * 50)
 
 # ---------- Sistema de Autenticação Melhorado ----------
 class SistemaAutenticacao:
@@ -694,30 +670,6 @@ def ajustar_para_fatura(data_compra, dia_fatura=10):
         return date(data_compra.year + 1, 1, dia_fatura)
     else:
         return date(data_compra.year, data_compra.month + 1, dia_fatura)
-
-# ---------- Banco ----------
-import time
-
-def get_conn(max_retries=3, retry_delay=1):
-    """Obtém conexão com retry em caso de falha"""
-    for attempt in range(max_retries):
-        try:
-            conn = sqlite3.connect(
-                str(DB_FILE), 
-                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-                timeout=30,  # Timeout de 30 segundos
-                check_same_thread=False  # Permite múltiplas threads
-            )
-            # Configurações para melhor performance
-            conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging
-            conn.execute("PRAGMA busy_timeout=5000")  # Timeout de 5 segundos
-            return conn
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
-                continue
-            else:
-                raise e
 
 def ensure_tables_exist():
     conn = get_conn()

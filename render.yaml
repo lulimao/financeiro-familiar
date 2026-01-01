@@ -1,19 +1,7 @@
 services:
   - type: web
     name: financeiro-familiar
-    env: docker
+    env: python
     plan: free
-    dockerfilePath: ./Dockerfile
-    disk:
-      name: data
-      mountPath: /app/data
-      sizeGB: 1
-    envVars:
-      - key: PYTHONUNBUFFERED
-        value: "true"
-      - key: RENDER
-        value: "true"
-      - key: STREAMLIT_SERVER_PORT
-        value: "10000"
-    healthCheckPath: /_stcore/health
-    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port=10000 --server.address=0.0.0.0

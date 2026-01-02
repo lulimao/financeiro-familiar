@@ -20,7 +20,7 @@ print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
 print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
 print("=" * 60)
 
-st.write("Versão atualizada às: 01h20")
+st.write("Versão atualizada às: 13:03")
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
@@ -45,7 +45,7 @@ else:
     # Local ou Streamlit Cloud
     DATABASE_URL = os.environ.get('DATABASE_URL') # Ou sqlite
     BASE_DIR = Path(__file__).parent
-    
+
 # ---------- Banco ----------
 import time
 

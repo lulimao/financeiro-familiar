@@ -12,6 +12,13 @@ import re
 import os
 import traceback
 
+# Debug: Verificar variáveis de ambiente
+print("=" * 50)
+print(f"PORT: {os.environ.get('PORT')}")
+print(f"RAILWAY_ENVIRONMENT: {os.environ.get('RAILWAY_ENVIRONMENT')}")
+print(f"DATABASE_URL: {'Definida' if os.environ.get('DATABASE_URL') else 'Não definida'}")
+print("=" * 50)
+
 # Configurar porta do Railway
 PORT = int(os.environ.get("PORT", 8080))
 

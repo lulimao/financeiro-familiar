@@ -816,38 +816,6 @@ def ajustar_para_fatura(data_compra, dia_fatura=10):
         return date(data_compra.year + 1, 1, dia_fatura)
     else:
         return date(data_compra.year, data_compra.month + 1, dia_fatura)
-
-def ensure_tables_exist():
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    # Tabela de transações
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS transacoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data_registro DATE,
-            data_pagamento DATE,
-            pessoa TEXT,
-            categoria TEXT,
-            tipo TEXT,
-            valor REAL,
-            descricao TEXT,
-            recorrente INTEGER DEFAULT 0,
-            dia_fixo INTEGER,
-            pessoa_responsavel TEXT DEFAULT 'Ambos',
-            no_cartao INTEGER DEFAULT 0,
-            investimento INTEGER DEFAULT 0,
-            vr INTEGER DEFAULT 0,
-            forma_pagamento TEXT DEFAULT 'Dinheiro',
-            parcelas INTEGER DEFAULT 1,
-            parcela_atual INTEGER DEFAULT 1,
-            status TEXT DEFAULT 'Ativa',
-            usuario_id INTEGER,
-            grupo TEXT DEFAULT 'padrao',
-            compartilhado INTEGER DEFAULT 0,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-        )
-    """)
     
     # Verificar e adicionar colunas ausentes se necessário
     colunas_necessarias = [
@@ -2259,41 +2227,47 @@ def pagina_configuracoes():
     with tab2:
         st.subheader("📊 Estatísticas do Sistema")
         
-        conn = sqlite3.connect(DB_FILE)
+        # Usar a conexão apropriada baseada no ambiente
+        conn = get_conn()
         cur = conn.cursor()
         
-        # Contar usuários
-        cur.execute("SELECT COUNT(*) FROM usuarios")
-        total_usuarios = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'ADM'")
-        admins = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'COMUM'")
-        comuns = cur.fetchone()[0]
-        
-        # Contar transações
-        cur.execute("SELECT COUNT(*) FROM transacoes")
-        total_transacoes = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Receita'")
-        receitas = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Despesa'")
-        despesas = cur.fetchone()[0]
-        
-        # Contar grupos
-        cur.execute("SELECT COUNT(DISTINCT grupo) FROM usuarios")
-        total_grupos = cur.fetchone()[0]
-        
-        # Usuários por tipo de base
-        cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 1")
-        compartilhados = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 0")
-        separados = cur.fetchone()[0]
-        
-        conn.close()
+        try:
+            # Contar usuários
+            cur.execute("SELECT COUNT(*) FROM usuarios")
+            total_usuarios = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'ADM'")
+            admins = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'COMUM'")
+            comuns = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            # Contar transações
+            cur.execute("SELECT COUNT(*) FROM transacoes")
+            total_transacoes = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Receita'")
+            receitas = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Despesa'")
+            despesas = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            # Contar grupos
+            cur.execute("SELECT COUNT(DISTINCT grupo) FROM usuarios")
+            total_grupos = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            # Usuários por tipo de base
+            cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 1")
+            compartilhados = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+            cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 0")
+            separados = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            
+        except Exception as e:
+            st.error(f"Erro ao obter estatísticas: {e}")
+            total_usuarios = admins = comuns = total_transacoes = receitas = despesas = total_grupos = compartilhados = separados = 0
+        finally:
+            conn.close()
         
         col1, col2 = st.columns(2)
         
@@ -2310,7 +2284,7 @@ def pagina_configuracoes():
             st.metric("🔄 Bases Compartilhadas", compartilhados)
             st.metric("🔒 Bases Separadas", separados)
 
-            # ---------- Inicialização ----------
+# ---------- Inicialização ----------
 # Inicializar arquivos apenas se for ambiente cloud
 if IS_RAILWAY or IS_STREAMLIT_CLOUD:
     inicializar_arquivos_cloud()

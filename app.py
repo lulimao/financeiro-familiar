@@ -1,5 +1,4 @@
 import streamlit as st
-import psycopg2
 import pandas as pd
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -11,17 +10,17 @@ import hashlib
 import re
 import os
 import traceback
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import create_engine, text, inspect, MetaData, Table, Column, Integer, String, Float, Date, Boolean, TIMESTAMP
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
 import urllib.parse as urlparse
 
+# ---------- CONFIGURAÇÃO SQLALCHEMY ----------
+Base = declarative_base()
+
 # ---------- DETECTAR AMBIENTE ----------
-# Verificar se estamos no Railway (produção)
 IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') in ['true', 'production'] or 'DATABASE_URL' in os.environ
-
-# Verificar se estamos no Streamlit Cloud (opcional)
 IS_STREAMLIT_CLOUD = 'STREAMLIT_CLOUD' in os.environ or 'STREAMLIT_SERVER_PORT' in os.environ
-
-# Ambiente local (fallback)
 IS_LOCAL = not (IS_RAILWAY or IS_STREAMLIT_CLOUD)
 
 print("=" * 60)
@@ -48,7 +47,7 @@ if IS_RAILWAY:
         DATABASE_URL = raw_url
 else:
     print("🟡 Usando PostgreSQL (Local/Streamlit Cloud)")
-    DATABASE_URL = None
+    DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/financeiro"
 
 # ---------- DEFINIR ARQUIVOS ----------
 BASE_DIR = Path(__file__).parent
@@ -57,137 +56,151 @@ DB_FILE = BASE_DIR / "financeiro.db"
 EXCEL_APOIO = BASE_DIR / "planilha_apoio.xlsx"
 APOIO_SHEET = "Planilha apoio"
 
-# ---------- Banco ----------
-import time
-
-def get_conn(max_retries=3, retry_delay=1):
-    """Obtém conexão com retry em caso de falha"""
-    
-    # PostgreSQL
-    if DATABASE_URL:
-        for attempt in range(max_retries):
-            try:
-                # Parse da URL do PostgreSQL
-                result = urlparse.urlparse(DATABASE_URL)
-                
-                conn = psycopg2.connect(
-                    database=result.path[1:],
-                    user=result.username,
-                    password=result.password,
-                    host=result.hostname,
-                    port=result.port,
-                    cursor_factory=RealDictCursor
-                )
-                print("✅ Conectado ao PostgreSQL")
-                return conn
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
-                    continue
-                else:
-                    print(f"❌ Erro ao conectar ao PostgreSQL: {e}")
-                    raise e
-
-def ensure_tables_exist():
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    print("🔄 Criando tabelas no PostgreSQL...")
-    
-    # Tabela de usuários para PostgreSQL
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            senha_hash VARCHAR(255) NOT NULL,
-            tipo VARCHAR(10) NOT NULL DEFAULT 'COMUM',
-            nome VARCHAR(100),
-            email VARCHAR(100),
-            ativo BOOLEAN DEFAULT TRUE,
-            grupo VARCHAR(50) DEFAULT 'padrao',
-            compartilhado INTEGER DEFAULT 1,
-            pode_compartilhar INTEGER DEFAULT 0,
-            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            data_ultimo_login TIMESTAMP
-        )
-    """)
-    
-    # Tabela de transações para PostgreSQL
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS transacoes (
-            id SERIAL PRIMARY KEY,
-            data_registro DATE,
-            data_pagamento DATE,
-            pessoa TEXT,
-            categoria TEXT,
-            tipo TEXT,
-            valor REAL,
-            descricao TEXT,
-            recorrente INTEGER DEFAULT 0,
-            dia_fixo INTEGER,
-            pessoa_responsavel TEXT DEFAULT 'Ambos',
-            no_cartao INTEGER DEFAULT 0,
-            investimento INTEGER DEFAULT 0,
-            vr INTEGER DEFAULT 0,
-            forma_pagamento TEXT DEFAULT 'Dinheiro',
-            parcelas INTEGER DEFAULT 1,
-            parcela_atual INTEGER DEFAULT 1,
-            status TEXT DEFAULT 'Ativa',
-            usuario_id INTEGER,
-            grupo TEXT DEFAULT 'padrao',
-            compartilhado INTEGER DEFAULT 0,
-            CONSTRAINT fk_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-        )
-    """)
-    
-    # Tabela de logs para PostgreSQL
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS logs_acesso (
-            id SERIAL PRIMARY KEY,
-            usuario_id INTEGER,
-            acao VARCHAR(50),
-            descricao TEXT,
-            data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-        )
-    """)
-    
-    # Verificar e adicionar colunas ausentes se necessário (PostgreSQL)
+# ---------- CRIAR ENGINE SQLALCHEMY ----------
+def create_sqlalchemy_engine():
+    """Cria engine SQLAlchemy com configuração apropriada"""
     try:
-        # Verificar colunas na tabela transacoes
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'transacoes'
-        """)
-        colunas_existentes = [row['column_name'] for row in cur.fetchall()]
-        
-        colunas_necessarias = [
-            'data_registro', 'data_pagamento', 'parcelas', 'parcela_atual', 'status',
-            'usuario_id', 'grupo', 'compartilhado'
-        ]
-        
-        for coluna in colunas_necessarias:
-            if coluna not in colunas_existentes:
-                if coluna == 'status':
-                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'Ativa'")
-                elif coluna == 'usuario_id':
-                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER REFERENCES usuarios(id)")
-                elif coluna == 'grupo':
-                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'padrao'")
-                elif coluna == 'compartilhado':
-                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 0")
-                elif coluna in ['data_registro', 'data_pagamento']:
-                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} DATE")
-                else:
-                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 1")
-                print(f"✅ Coluna {coluna} adicionada à tabela transacoes")
+        if DATABASE_URL:
+            engine = create_engine(
+                DATABASE_URL,
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+                pool_recycle=300,
+                echo=False
+            )
+            print("✅ Engine SQLAlchemy criado")
+            return engine
+        else:
+            print("❌ DATABASE_URL não configurada")
+            return None
     except Exception as e:
-        print(f"⚠️ Erro ao verificar/adicionar colunas: {e}")
+        print(f"❌ Erro ao criar engine SQLAlchemy: {e}")
+        return None
+
+# Criar engine global
+engine = create_sqlalchemy_engine()
+
+# ---------- MODELOS SQLALCHEMY ----------
+class Usuario(Base):
+    __tablename__ = 'usuarios'
     
-    conn.commit()
-    conn.close()
-    print("✅ Tabelas verificadas/criadas com sucesso!")
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), unique=True, nullable=False)
+    senha_hash = Column(String(255), nullable=False)
+    tipo = Column(String(10), nullable=False, default='COMUM')
+    nome = Column(String(100))
+    email = Column(String(100))
+    ativo = Column(Boolean, default=True)
+    grupo = Column(String(50), default='padrao')
+    compartilhado = Column(Integer, default=1)
+    pode_compartilhar = Column(Integer, default=0)
+    data_criacao = Column(TIMESTAMP, default=datetime.utcnow)
+    data_ultimo_login = Column(TIMESTAMP)
+
+class Transacao(Base):
+    __tablename__ = 'transacoes'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    data_registro = Column(Date)
+    data_pagamento = Column(Date)
+    pessoa = Column(String)
+    categoria = Column(String)
+    tipo = Column(String)
+    valor = Column(Float)
+    descricao = Column(String)
+    recorrente = Column(Integer, default=0)
+    dia_fixo = Column(Integer)
+    pessoa_responsavel = Column(String, default='Ambos')
+    no_cartao = Column(Integer, default=0)
+    investimento = Column(Integer, default=0)
+    vr = Column(Integer, default=0)
+    forma_pagamento = Column(String, default='Dinheiro')
+    parcelas = Column(Integer, default=1)
+    parcela_atual = Column(Integer, default=1)
+    status = Column(String, default='Ativa')
+    usuario_id = Column(Integer)
+    grupo = Column(String, default='padrao')
+    compartilhado = Column(Integer, default=0)
+
+class LogAcesso(Base):
+    __tablename__ = 'logs_acesso'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    usuario_id = Column(Integer)
+    acao = Column(String(50))
+    descricao = Column(String)
+    data_hora = Column(TIMESTAMP, default=datetime.utcnow)
+
+# ---------- FUNÇÕES DE BANCO DE DADOS ----------
+def init_db():
+    """Inicializa o banco de dados e cria tabelas se não existirem"""
+    if engine is None:
+        print("❌ Engine não disponível para inicializar banco")
+        return False
+    
+    try:
+        # Criar todas as tabelas
+        Base.metadata.create_all(engine)
+        print("✅ Tabelas criadas/verificadas com sucesso")
+        
+        # Verificar e adicionar colunas faltantes
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+            
+            # Verificar colunas da tabela usuarios
+            if 'usuarios' in inspector.get_table_names():
+                colunas_usuarios = [col['name'] for col in inspector.get_columns('usuarios')]
+                
+                colunas_necessarias = [
+                    ('grupo', 'VARCHAR(50)', "'padrao'"),
+                    ('compartilhado', 'INTEGER', '1'),
+                    ('pode_compartilhar', 'INTEGER', '0'),
+                    ('data_criacao', 'TIMESTAMP', 'CURRENT_TIMESTAMP'),
+                    ('data_ultimo_login', 'TIMESTAMP', 'NULL')
+                ]
+                
+                for coluna, tipo, padrao in colunas_necessarias:
+                    if coluna not in colunas_usuarios:
+                        try:
+                            conn.execute(text(f"ALTER TABLE usuarios ADD COLUMN {coluna} {tipo} DEFAULT {padrao}"))
+                            print(f"✅ Coluna {coluna} adicionada à tabela usuarios")
+                        except Exception as e:
+                            print(f"⚠️ Erro ao adicionar coluna {coluna}: {e}")
+            
+            # Verificar colunas da tabela transacoes
+            if 'transacoes' in inspector.get_table_names():
+                colunas_transacoes = [col['name'] for col in inspector.get_columns('transacoes')]
+                
+                colunas_necessarias_transacoes = [
+                    ('usuario_id', 'INTEGER', 'NULL'),
+                    ('grupo', 'VARCHAR(50)', "'padrao'"),
+                    ('compartilhado', 'INTEGER', '0'),
+                    ('status', 'VARCHAR(50)', "'Ativa'")
+                ]
+                
+                for coluna, tipo, padrao in colunas_necessarias_transacoes:
+                    if coluna not in colunas_transacoes:
+                        try:
+                            conn.execute(text(f"ALTER TABLE transacoes ADD COLUMN {coluna} {tipo} DEFAULT {padrao}"))
+                            print(f"✅ Coluna {coluna} adicionada à tabela transacoes")
+                        except Exception as e:
+                            print(f"⚠️ Erro ao adicionar coluna {coluna}: {e}")
+            
+            conn.commit()
+        
+        return True
+    except Exception as e:
+        print(f"❌ Erro ao inicializar banco de dados: {e}")
+        return False
+
+def get_session():
+    """Retorna uma sessão do SQLAlchemy"""
+    if engine is None:
+        return None
+    
+    Session = sessionmaker(bind=engine)
+    return Session()
 
 # ---------- Inicialização dos arquivos no Cloud ----------
 def inicializar_arquivos_cloud():
@@ -204,11 +217,15 @@ def inicializar_arquivos_cloud():
     # Criar planilha exemplo se não existir
     if not EXCEL_APOIO.exists():
         try:
+            # Listas de exemplo com mesmo tamanho
+            categorias_list = ['Alimentação', 'Moradia', 'Transporte', 'Lazer', 
+                              'Saúde', 'Educação', 'Salário', 'Outros']
+            formas_list = ['Dinheiro', 'Débito', 'Crédito', 
+                          'Transferência', 'Pix', 'Boleto', 'Pix', 'Pix']  # Mesmo tamanho
+            
             df_exemplo = pd.DataFrame({
-                'Categorias': ['Alimentação', 'Moradia', 'Transporte', 'Lazer', 
-                              'Saúde', 'Educação', 'Salário', 'Outros'],
-                'Formas_Pagamento': ['Dinheiro', 'Débito', 'Crédito', 
-                                     'Transferência', 'Pix', 'Boleto']
+                'Categorias': categorias_list,
+                'Formas_Pagamento': formas_list
             })
             df_exemplo.to_excel(EXCEL_APOIO, sheet_name='Planilha apoio', index=False)
             print(f"✅ Planilha exemplo criada")
@@ -217,13 +234,7 @@ def inicializar_arquivos_cloud():
     
     print(f"✅ Inicialização de arquivos concluída")
 
-print("=" * 50)
-print(f"Sistema Financeiro Familiar")
-print(f"Ambiente: {'Railway' if IS_RAILWAY else 'Streamlit Cloud' if IS_STREAMLIT_CLOUD else 'Local'}")
-print(f"Banco: PostgreSQL")
-print("=" * 50)
-
-# ---------- Sistema de Autenticação Melhorado ----------
+# ---------- Sistema de Autenticação ----------
 class SistemaAutenticacao:
     def __init__(self):
         self._verificar_e_atualizar_estrutura_banco()
@@ -231,192 +242,48 @@ class SistemaAutenticacao:
     
     def _verificar_e_atualizar_estrutura_banco(self):
         """Verifica e atualiza a estrutura do banco de dados"""
-        conn = get_conn()
-        cur = conn.cursor()
-        
-        # 1. Criar tabela de usuários se não existir
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) UNIQUE NOT NULL,
-                senha_hash VARCHAR(255) NOT NULL,
-                tipo VARCHAR(10) NOT NULL DEFAULT 'COMUM',
-                nome VARCHAR(100),
-                email VARCHAR(100),
-                ativo BOOLEAN DEFAULT TRUE,
-                grupo VARCHAR(50) DEFAULT 'padrao',
-                compartilhado INTEGER DEFAULT 1,
-                pode_compartilhar INTEGER DEFAULT 0,
-                data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                data_ultimo_login TIMESTAMP
-            )
-        """)
-        
-        # 2. Verificar e adicionar colunas faltantes
-        try:
-            cur.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'usuarios'
-            """)
-            colunas_existentes = [row['column_name'] for row in cur.fetchall()]
-            
-            colunas_necessarias = [
-                ('grupo', 'VARCHAR(50) DEFAULT \'padrao\''),
-                ('compartilhado', 'INTEGER DEFAULT 1'),
-                ('pode_compartilhar', 'INTEGER DEFAULT 0'),
-                ('data_criacao', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
-                ('data_ultimo_login', 'TIMESTAMP')
-            ]
-            
-            # Adicionar colunas faltantes
-            for coluna, definicao in colunas_necessarias:
-                if coluna not in colunas_existentes:
-                    try:
-                        cur.execute(f"ALTER TABLE usuarios ADD COLUMN {coluna} {definicao}")
-                        print(f"Coluna {coluna} adicionada à tabela usuarios")
-                    except Exception as e:
-                        print(f"Erro ao adicionar coluna {coluna}: {e}")
-        except Exception as e:
-            print(f"Erro ao verificar colunas: {e}")
-        
-        # 3. Criar tabela de logs
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS logs_acesso (
-                id SERIAL PRIMARY KEY,
-                usuario_id INTEGER,
-                acao VARCHAR(50),
-                descricao TEXT,
-                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-            )
-        """)
-        
-        # 4. Criar tabela de transações se não existir
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS transacoes (
-                id SERIAL PRIMARY KEY,
-                data_registro DATE,
-                data_pagamento DATE,
-                pessoa TEXT,
-                categoria TEXT,
-                tipo TEXT,
-                valor REAL,
-                descricao TEXT,
-                recorrente INTEGER DEFAULT 0,
-                dia_fixo INTEGER,
-                pessoa_responsavel TEXT DEFAULT 'Ambos',
-                no_cartao INTEGER DEFAULT 0,
-                investimento INTEGER DEFAULT 0,
-                vr INTEGER DEFAULT 0,
-                forma_pagamento TEXT DEFAULT 'Dinheiro',
-                parcelas INTEGER DEFAULT 1,
-                parcela_atual INTEGER DEFAULT 1,
-                status TEXT DEFAULT 'Ativa',
-                usuario_id INTEGER,
-                grupo TEXT DEFAULT 'padrao',
-                compartilhado INTEGER DEFAULT 0,
-                CONSTRAINT fk_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-            )
-        """)
-        
-        # 5. Verificar colunas faltantes na tabela transacoes
-        try:
-            cur.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'transacoes'
-            """)
-            colunas_transacoes = [row['column_name'] for row in cur.fetchall()]
-            
-            colunas_transacoes_necessarias = [
-                ('usuario_id', 'INTEGER REFERENCES usuarios(id)'),
-                ('grupo', 'TEXT DEFAULT \'padrao\''),
-                ('compartilhado', 'INTEGER DEFAULT 0'),
-                ('status', 'TEXT DEFAULT \'Ativa\'')
-            ]
-            
-            for coluna, definicao in colunas_transacoes_necessarias:
-                if coluna not in colunas_transacoes:
-                    try:
-                        cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} {definicao}")
-                        print(f"Coluna {coluna} adicionada à tabela transacoes")
-                    except Exception as e:
-                        print(f"Erro ao adicionar coluna {coluna}: {e}")
-        except Exception as e:
-            print(f"Erro ao verificar colunas transacoes: {e}")
-        
-        conn.commit()
-        conn.close()
-        
-        # 6. Migrar dados existentes
-        self._migrar_dados_existentes()
-    
-    def _migrar_dados_existentes(self):
-        """Migra dados existentes para a nova estrutura"""
-        conn = get_conn()
-        cur = conn.cursor()
-        
-        try:
-            # Verificar se existem transações sem usuario_id
-            cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
-            count = cur.fetchone()['count']
-            
-            if count > 0:
-                print(f"⚠️ Migrando {count} transações existentes...")
-                
-                # Atribuir ao primeiro usuário ADM encontrado
-                cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
-                admin_id_result = cur.fetchone()
-                
-                if admin_id_result:
-                    admin_id = admin_id_result['id']
-                    cur.execute("""
-                        UPDATE transacoes 
-                        SET usuario_id = %s, grupo = 'padrao', compartilhado = 1
-                        WHERE usuario_id IS NULL
-                    """, (admin_id,))
-                    conn.commit()
-                    print(f"✅ {count} transações migradas para o usuário admin (ID: {admin_id})")
-        
-        except Exception as e:
-            print(f"Erro na migração: {e}")
-        finally:
-            conn.close()
+        init_db()
     
     def _criar_admin_padrao(self):
         """Cria usuário administrador padrão se não existir"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            print("❌ Não foi possível obter sessão do banco")
+            return
         
         try:
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE username = %s", ("admin",))
-            count = cur.fetchone()['count']
+            # Verificar se admin já existe
+            admin = session.query(Usuario).filter_by(username='admin').first()
             
-            if count == 0:
+            if not admin:
                 # Senha padrão: admin123
                 senha_hash = self._hash_senha("admin123")
-                cur.execute("""
-                    INSERT INTO usuarios (username, senha_hash, tipo, nome, email, grupo, compartilhado, pode_compartilhar)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, ("admin", senha_hash, "ADM", "Administrador", "admin@financeiro.com", "admin", 1, 1))
                 
-                conn.commit()
+                novo_admin = Usuario(
+                    username='admin',
+                    senha_hash=senha_hash,
+                    tipo='ADM',
+                    nome='Administrador',
+                    email='admin@financeiro.com',
+                    grupo='admin',
+                    compartilhado=1,
+                    pode_compartilhar=1
+                )
+                
+                session.add(novo_admin)
+                session.commit()
                 print("✅ Usuário administrador padrão criado: admin / admin123")
             else:
                 # Verificar se o admin tem senha atualizada
-                cur.execute("SELECT senha_hash FROM usuarios WHERE username = %s", ("admin",))
-                senha_hash_atual = cur.fetchone()['senha_hash']
-                
-                # Se a senha ainda for a padrão (admin123), avisar para alterar
                 senha_padrao_hash = self._hash_senha("admin123")
-                if senha_hash_atual == senha_padrao_hash:
+                if admin.senha_hash == senha_padrao_hash:
                     print("⚠️ ATENÇÃO: Usuário admin ainda está com senha padrão 'admin123'")
-                    
+        
         except Exception as e:
-            print(f"Erro ao criar admin padrão: {e}")
+            print(f"❌ Erro ao criar admin padrão: {e}")
+            session.rollback()
         finally:
-            conn.close()
+            session.close()
     
     def _hash_senha(self, senha):
         """Gera hash da senha usando SHA-256 com salt"""
@@ -441,73 +308,70 @@ class SistemaAutenticacao:
     
     def autenticar(self, username, senha):
         """Autentica usuário e retorna dados se válido"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            return False, None, "Erro de conexão com o banco"
         
         try:
             # Buscar usuário
-            cur.execute("""
-                SELECT id, username, senha_hash, tipo, nome, grupo, compartilhado 
-                FROM usuarios 
-                WHERE username = %s AND ativo = TRUE
-            """, (username,))
-            
-            usuario = cur.fetchone()
+            usuario = session.query(Usuario).filter(
+                Usuario.username == username,
+                Usuario.ativo == True
+            ).first()
             
             if not usuario:
                 return False, None, "Usuário não encontrado ou inativo"
             
             # Verificar senha
             senha_hash = self._hash_senha(senha)
-            if usuario['senha_hash'] != senha_hash:
+            if usuario.senha_hash != senha_hash:
                 return False, None, "Senha incorreta"
             
             # Atualizar data do último login
-            cur.execute("""
-                UPDATE usuarios 
-                SET data_ultimo_login = CURRENT_TIMESTAMP 
-                WHERE id = %s
-            """, (usuario['id'],))
+            usuario.data_ultimo_login = datetime.utcnow()
+            
+            # Log de acesso
+            log = LogAcesso(
+                usuario_id=usuario.id,
+                acao='LOGIN',
+                descricao='Login realizado com sucesso'
+            )
+            session.add(log)
+            
+            session.commit()
             
             # Dados do usuário
             user_data = {
-                'id': usuario['id'],
-                'username': usuario['username'],
-                'tipo': usuario['tipo'],
-                'nome': usuario['nome'],
-                'grupo': usuario['grupo'] or 'padrao',
-                'compartilhado': usuario['compartilhado'] or 0
+                'id': usuario.id,
+                'username': usuario.username,
+                'tipo': usuario.tipo,
+                'nome': usuario.nome,
+                'grupo': usuario.grupo or 'padrao',
+                'compartilhado': usuario.compartilhado or 0
             }
             
-            # Log de acesso
-            cur.execute("""
-                INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (%s, 'LOGIN', 'Login realizado com sucesso')
-            """, (usuario['id'],))
-            
-            conn.commit()
             return True, user_data, "Login realizado com sucesso"
             
         except Exception as e:
             return False, None, f"Erro na autenticação: {str(e)}"
         finally:
-            conn.close()
+            session.close()
     
     def alterar_senha(self, username, senha_atual, nova_senha):
         """Altera a senha do usuário"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            return False, "Erro de conexão com o banco"
         
         try:
             # Verificar senha atual
-            cur.execute("SELECT id, senha_hash FROM usuarios WHERE username = %s", (username,))
-            usuario = cur.fetchone()
+            usuario = session.query(Usuario).filter_by(username=username).first()
             
             if not usuario:
                 return False, "Usuário não encontrado"
             
             senha_hash_atual = self._hash_senha(senha_atual)
-            if usuario['senha_hash'] != senha_hash_atual:
+            if usuario.senha_hash != senha_hash_atual:
                 return False, "Senha atual incorreta"
             
             # Validar nova senha
@@ -517,128 +381,161 @@ class SistemaAutenticacao:
             
             # Atualizar senha
             nova_senha_hash = self._hash_senha(nova_senha)
-            cur.execute("""
-                UPDATE usuarios 
-                SET senha_hash = %s 
-                WHERE id = %s
-            """, (nova_senha_hash, usuario['id']))
+            usuario.senha_hash = nova_senha_hash
             
             # Log
-            cur.execute("""
-                INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (%s, 'ALTERACAO_SENHA', 'Senha alterada com sucesso')
-            """, (usuario['id'],))
+            log = LogAcesso(
+                usuario_id=usuario.id,
+                acao='ALTERACAO_SENHA',
+                descricao='Senha alterada com sucesso'
+            )
+            session.add(log)
             
-            conn.commit()
+            session.commit()
             return True, "Senha alterada com sucesso"
             
         except Exception as e:
+            session.rollback()
             return False, f"Erro ao alterar senha: {str(e)}"
         finally:
-            conn.close()
+            session.close()
     
     def listar_usuarios(self):
         """Lista todos os usuários"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            return [], []
         
-        cur.execute("""
-            SELECT id, username, tipo, nome, email, ativo, grupo, compartilhado,
-                   data_criacao, data_ultimo_login
-            FROM usuarios
-            ORDER BY tipo DESC, username
-        """)
-        
-        usuarios = cur.fetchall()
-        colunas = [desc[0] for desc in cur.description]
-        conn.close()
-        
-        return usuarios, colunas
+        try:
+            usuarios = session.query(Usuario).order_by(
+                Usuario.tipo.desc(),
+                Usuario.username
+            ).all()
+            
+            # Converter para lista de dicionários
+            usuarios_list = []
+            for usuario in usuarios:
+                usuarios_list.append({
+                    'id': usuario.id,
+                    'username': usuario.username,
+                    'tipo': usuario.tipo,
+                    'nome': usuario.nome,
+                    'email': usuario.email,
+                    'ativo': usuario.ativo,
+                    'grupo': usuario.grupo,
+                    'compartilhado': usuario.compartilhado,
+                    'data_criacao': usuario.data_criacao,
+                    'data_ultimo_login': usuario.data_ultimo_login
+                })
+            
+            return usuarios_list, list(usuarios_list[0].keys()) if usuarios_list else []
+        except Exception as e:
+            print(f"Erro ao listar usuários: {e}")
+            return [], []
+        finally:
+            session.close()
     
     def alterar_status_usuario(self, usuario_id, ativo):
         """Ativa/desativa um usuário"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            return False, "Erro de conexão com o banco"
         
         try:
-            cur.execute("""
-                UPDATE usuarios 
-                SET ativo = %s 
-                WHERE id = %s
-            """, (True if ativo else False, usuario_id))
+            usuario = session.query(Usuario).filter_by(id=usuario_id).first()
+            
+            if not usuario:
+                return False, "Usuário não encontrado"
+            
+            usuario.ativo = bool(ativo)
             
             # Log
             status = "ativado" if ativo else "desativado"
-            cur.execute("""
-                INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (%s, 'ALTERACAO_STATUS', %s)
-            """, (usuario_id, f'Usuário {status}'))
+            log = LogAcesso(
+                usuario_id=usuario_id,
+                acao='ALTERACAO_STATUS',
+                descricao=f'Usuário {status}'
+            )
+            session.add(log)
             
-            conn.commit()
+            session.commit()
             return True, f"Usuário {status} com sucesso"
             
         except Exception as e:
+            session.rollback()
             return False, f"Erro ao alterar status: {str(e)}"
         finally:
-            conn.close()
+            session.close()
     
     def alterar_tipo_usuario(self, usuario_id, novo_tipo):
         """Altera o tipo de usuário (ADM/COMUM)"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            return False, "Erro de conexão com o banco"
         
         try:
-            cur.execute("""
-                UPDATE usuarios 
-                SET tipo = %s 
-                WHERE id = %s
-            """, (novo_tipo, usuario_id))
+            usuario = session.query(Usuario).filter_by(id=usuario_id).first()
+            
+            if not usuario:
+                return False, "Usuário não encontrado"
+            
+            usuario.tipo = novo_tipo
             
             # Log
-            cur.execute("""
-                INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (%s, 'ALTERACAO_TIPO', %s)
-            """, (usuario_id, f'Tipo alterado para {novo_tipo}'))
+            log = LogAcesso(
+                usuario_id=usuario_id,
+                acao='ALTERACAO_TIPO',
+                descricao=f'Tipo alterado para {novo_tipo}'
+            )
+            session.add(log)
             
-            conn.commit()
+            session.commit()
             return True, f"Tipo de usuário alterado para {novo_tipo}"
             
         except Exception as e:
+            session.rollback()
             return False, f"Erro ao alterar tipo: {str(e)}"
         finally:
-            conn.close()
+            session.close()
     
     def alterar_grupo_usuario(self, usuario_id, novo_grupo, novo_compartilhado):
         """Altera o grupo e status de compartilhamento do usuário"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            return False, "Erro de conexão com o banco"
         
         try:
-            cur.execute("""
-                UPDATE usuarios 
-                SET grupo = %s, compartilhado = %s
-                WHERE id = %s
-            """, (novo_grupo, novo_compartilhado, usuario_id))
+            usuario = session.query(Usuario).filter_by(id=usuario_id).first()
+            
+            if not usuario:
+                return False, "Usuário não encontrado"
+            
+            usuario.grupo = novo_grupo
+            usuario.compartilhado = novo_compartilhado
             
             # Log
             compartilhado_str = "compartilhado" if novo_compartilhado else "separado"
-            cur.execute("""
-                INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (%s, 'ALTERACAO_GRUPO', %s)
-            """, (usuario_id, f'Grupo alterado para {novo_grupo} ({compartilhado_str})'))
+            log = LogAcesso(
+                usuario_id=usuario_id,
+                acao='ALTERACAO_GRUPO',
+                descricao=f'Grupo alterado para {novo_grupo} ({compartilhado_str})'
+            )
+            session.add(log)
             
-            conn.commit()
+            session.commit()
             return True, f"Grupo alterado para {novo_grupo} ({compartilhado_str})"
             
         except Exception as e:
+            session.rollback()
             return False, f"Erro ao alterar grupo: {str(e)}"
         finally:
-            conn.close()
+            session.close()
 
     def criar_usuario(self, username, senha, tipo="COMUM", nome=None, email=None, grupo="padrao", compartilhado=0):
         """Cria um novo usuário no sistema"""
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            return False, "Erro de conexão com o banco", None
         
         try:
             # Validar força da senha
@@ -647,64 +544,73 @@ class SistemaAutenticacao:
                 return False, mensagem, None
             
             # Verificar se usuário já existe
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE username = %s", (username,))
-            if cur.fetchone()['count'] > 0:
+            existing_user = session.query(Usuario).filter_by(username=username).first()
+            if existing_user:
                 return False, "Usuário já existe", None
             
             # Criar hash da senha
             senha_hash = self._hash_senha(senha)
             
             # Inserir novo usuário
-            cur.execute("""
-                INSERT INTO usuarios (username, senha_hash, tipo, nome, email, grupo, compartilhado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (username, senha_hash, tipo, nome, email, grupo, compartilhado))
+            novo_usuario = Usuario(
+                username=username,
+                senha_hash=senha_hash,
+                tipo=tipo,
+                nome=nome,
+                email=email,
+                grupo=grupo,
+                compartilhado=compartilhado
+            )
             
-            usuario_id = cur.fetchone()['id']
+            session.add(novo_usuario)
+            session.flush()  # Para obter o ID
             
             # Log
-            cur.execute("""
-                INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (%s, 'CRIACAO_USUARIO', %s)
-            """, (usuario_id, f'Novo usuário criado: {username}'))
+            log = LogAcesso(
+                usuario_id=novo_usuario.id,
+                acao='CRIACAO_USUARIO',
+                descricao=f'Novo usuário criado: {username}'
+            )
+            session.add(log)
             
-            conn.commit()
-            return True, "Usuário criado com sucesso", usuario_id
+            session.commit()
+            return True, "Usuário criado com sucesso", novo_usuario.id
             
         except Exception as e:
+            session.rollback()
             return False, f"Erro ao criar usuário: {str(e)}", None
         finally:
-            conn.close()
+            session.close()
 
-# ---------- Inicialização Robusta do Sistema ----------
+# ---------- Inicialização do Sistema ----------
 def inicializar_sistema_completo():
     """Inicializa todo o sistema com tratamento de erros"""
     try:
-        # Inicializar sistema de autenticação (que já cria as tabelas)
+        # Inicializar arquivos cloud se necessário
+        if IS_RAILWAY or IS_STREAMLIT_CLOUD:
+            inicializar_arquivos_cloud()
+        
+        # Inicializar sistema de autenticação
         auth_system = SistemaAutenticacao()
         
-        # Garantir que tabelas existem (redundante, mas seguro)
-        ensure_tables_exist()
+        print("=" * 50)
+        print(f"Sistema Financeiro Familiar")
+        print(f"Ambiente: {'Railway' if IS_RAILWAY else 'Streamlit Cloud' if IS_STREAMLIT_CLOUD else 'Local'}")
+        print(f"Banco: PostgreSQL (SQLAlchemy)")
+        print("=" * 50)
         
         return auth_system
     except Exception as e:
         st.error(f"❌ Erro crítico na inicialização do sistema: {e}")
         return SistemaAutenticacao()
 
-# Inicializar auth como None primeiro
+# Inicializar auth
 auth = None
-
 try:
     auth = inicializar_sistema_completo()
 except Exception as e:
     st.error(f"⚠️ Erro ao inicializar: {e}. Tentando continuar...")
-    try:
-        auth = SistemaAutenticacao()
-    except Exception as e2:
-        st.error(f"❌ Erro crítico: Não foi possível inicializar o sistema: {e2}")
-        # Forçar criação de uma instância básica
-        auth = None
+    auth = SistemaAutenticacao()
 
 # ---------- Funções auxiliares ----------
 def load_config():
@@ -730,333 +636,323 @@ def ajustar_para_fatura(data_compra, dia_fatura=10):
         return date(data_compra.year, data_compra.month + 1, dia_fatura)
 
 def inserir_transacao(tipo, data_registro, data_pagamento, descricao, valor, categoria, forma, extra_fields=None, usuario_id=None):
-    pessoa = "Ambos"
-    recorrente = 0
-    dia_fixo = None
-    pessoa_responsavel = "Ambos"
-    no_cartao = 1 if ("cred" in forma.lower() or "cart" in forma.lower()) else 0
-    investimento = 0
-    vr = 0
-    parcelas = 1
-    parcela_atual = 1
-
-    if extra_fields:
-        recorrente = int(extra_fields.get("recorrente", recorrente))
-        dia_fixo = extra_fields.get("dia_fixo", dia_fixo)
-        pessoa_responsavel = extra_fields.get("pessoa_responsavel", pessoa_responsavel)
-        no_cartao = int(extra_fields.get("no_cartao", no_cartao))
-        investimento = int(extra_fields.get("investimento", investimento))
-        vr = int(extra_fields.get("vr", vr))
-        parcelas = int(extra_fields.get("parcelas", parcelas))
-        parcela_atual = int(extra_fields.get("parcela_atual", parcela_atual))
-
-    conn = get_conn()
-    cur = conn.cursor()
+    """Insere uma transação no banco usando SQLAlchemy"""
+    session = get_session()
+    if session is None:
+        return False
     
-    # Buscar informações do usuário
-    grupo_usuario = "padrao"
-    compartilhado_usuario = 0
-    
-    if usuario_id:
-        cur.execute("SELECT grupo, compartilhado FROM usuarios WHERE id = %s", (usuario_id,))
-        resultado = cur.fetchone()
-        if resultado:
-            grupo_usuario = resultado['grupo'] if resultado['grupo'] else "padrao"
-            compartilhado_usuario = resultado['compartilhado'] if resultado['compartilhado'] else 0
-    
-    # Determinar compartilhamento baseado no usuário
-    compartilhado = compartilhado_usuario
+    try:
+        pessoa = "Ambos"
+        recorrente = 0
+        dia_fixo = None
+        pessoa_responsavel = "Ambos"
+        no_cartao = 1 if ("cred" in forma.lower() or "cart" in forma.lower()) else 0
+        investimento = 0
+        vr = 0
+        parcelas = 1
+        parcela_atual = 1
 
-    cur.execute("""
-        INSERT INTO transacoes (
-            data_registro, data_pagamento, pessoa, categoria, tipo, valor, descricao, 
-            recorrente, dia_fixo, pessoa_responsavel, no_cartao, investimento, vr, 
-            forma_pagamento, parcelas, parcela_atual, status, usuario_id, grupo, compartilhado
+        if extra_fields:
+            recorrente = int(extra_fields.get("recorrente", recorrente))
+            dia_fixo = extra_fields.get("dia_fixo", dia_fixo)
+            pessoa_responsavel = extra_fields.get("pessoa_responsavel", pessoa_responsavel)
+            no_cartao = int(extra_fields.get("no_cartao", no_cartao))
+            investimento = int(extra_fields.get("investimento", investimento))
+            vr = int(extra_fields.get("vr", vr))
+            parcelas = int(extra_fields.get("parcelas", parcelas))
+            parcela_atual = int(extra_fields.get("parcela_atual", parcela_atual))
+        
+        # Buscar informações do usuário
+        grupo_usuario = "padrao"
+        compartilhado_usuario = 0
+        
+        if usuario_id:
+            usuario = session.query(Usuario).filter_by(id=usuario_id).first()
+            if usuario:
+                grupo_usuario = usuario.grupo if usuario.grupo else "padrao"
+                compartilhado_usuario = usuario.compartilhado if usuario.compartilhado else 0
+        
+        # Determinar compartilhamento baseado no usuário
+        compartilhado = compartilhado_usuario
+
+        nova_transacao = Transacao(
+            data_registro=data_registro,
+            data_pagamento=data_pagamento,
+            pessoa=pessoa,
+            categoria=categoria,
+            tipo=tipo,
+            valor=float(valor),
+            descricao=descricao,
+            recorrente=recorrente,
+            dia_fixo=dia_fixo,
+            pessoa_responsavel=pessoa_responsavel,
+            no_cartao=no_cartao,
+            investimento=investimento,
+            vr=vr,
+            forma_pagamento=forma,
+            parcelas=parcelas,
+            parcela_atual=parcela_atual,
+            status='Ativa',
+            usuario_id=usuario_id,
+            grupo=grupo_usuario,
+            compartilhado=compartilhado
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (
-        data_registro.isoformat(), data_pagamento.isoformat(), pessoa, categoria, tipo, 
-        float(valor), descricao, recorrente, dia_fixo, pessoa_responsavel, no_cartao, 
-        investimento, vr, forma, parcelas, parcela_atual, 'Ativa', usuario_id, grupo_usuario, compartilhado
-    ))
-    
-    conn.commit()
-    conn.close()
+        
+        session.add(nova_transacao)
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        st.error(f"Erro ao inserir transação: {e}")
+        return False
+    finally:
+        session.close()
 
 def carregar_transacoes(usuario_id=None):
-    conn = get_conn()
+    """Carrega transações usando SQLAlchemy"""
+    session = get_session()
+    if session is None:
+        return pd.DataFrame()
+    
     try:
-        # Primeiro, verificar se o usuário existe e pegar seus dados
-        cur = conn.cursor()
+        # Buscar informações do usuário
         usuario_tipo = None
         usuario_grupo = None
         usuario_compartilhado = None
         
         if usuario_id:
-            cur.execute("SELECT tipo, grupo, compartilhado FROM usuarios WHERE id = %s", (usuario_id,))
-            resultado = cur.fetchone()
-            if resultado:
-                usuario_tipo = resultado['tipo']
-                usuario_grupo = resultado['grupo'] if resultado['grupo'] else "padrao"
-                usuario_compartilhado = resultado['compartilhado']
+            usuario = session.query(Usuario).filter_by(id=usuario_id).first()
+            if usuario:
+                usuario_tipo = usuario.tipo
+                usuario_grupo = usuario.grupo if usuario.grupo else "padrao"
+                usuario_compartilhado = usuario.compartilhado
         
         # Construir query base
-        query = """
-            SELECT t.*, u.username as usuario_nome 
-            FROM transacoes t
-            LEFT JOIN usuarios u ON t.usuario_id = u.id
-            WHERE (t.status != 'Excluída' OR t.status IS NULL)
-        """
-        params = []
+        query = session.query(
+            Transacao,
+            Usuario.username.label('usuario_nome')
+        ).outerjoin(
+            Usuario, Transacao.usuario_id == Usuario.id
+        ).filter(
+            (Transacao.status != 'Excluída') | (Transacao.status.is_(None))
+        )
         
         # Se não for ADM, aplicar filtros
         if usuario_tipo != "ADM":
             if usuario_compartilhado == 1:
                 # Usuário com base compartilhada: ver transações do mesmo grupo
-                query += " AND t.grupo = %s"
-                params.append(usuario_grupo)
+                query = query.filter(Transacao.grupo == usuario_grupo)
             else:
                 # Usuário com base separada: ver apenas suas transações
-                query += " AND t.usuario_id = %s"
-                params.append(usuario_id)
+                query = query.filter(Transacao.usuario_id == usuario_id)
         
-        query += " ORDER BY t.data_pagamento DESC, t.id DESC"
+        # Executar query
+        resultados = query.order_by(
+            Transacao.data_pagamento.desc(),
+            Transacao.id.desc()
+        ).all()
         
-        # Usar pandas para executar a query com parâmetros
-        if params:
-            df = pd.read_sql_query(query, conn, params=params)
-        else:
-            df = pd.read_sql_query(query, conn)
-        
-        if not df.empty:
+        if resultados:
+            # Converter para lista de dicionários
+            transacoes_list = []
+            for transacao, usuario_nome in resultados:
+                trans_dict = {c.name: getattr(transacao, c.name) for c in transacao.__table__.columns}
+                trans_dict['usuario_nome'] = usuario_nome
+                transacoes_list.append(trans_dict)
+            
+            df = pd.DataFrame(transacoes_list)
+            
+            # Converter colunas de data
             date_columns = ['data_registro', 'data_pagamento']
             for col in date_columns:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-        
-        return df
+            
+            return df
+        else:
+            return pd.DataFrame()
     except Exception as e:
         st.error(f"Erro ao carregar transações: {e}")
-        st.error(traceback.format_exc())
         return pd.DataFrame()
     finally:
-        conn.close()
+        session.close()
 
-# ---------- Funções principais ----------
 def processar_recorrencias_automaticas(usuario_id=None):
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    query = """
-        SELECT t.*, u.grupo, u.compartilhado
-        FROM transacoes t
-        LEFT JOIN usuarios u ON t.usuario_id = u.id
-        WHERE t.recorrente = 1 
-        AND (t.status IS NULL OR t.status != 'Excluída')
-    """
-    params = []
-    
-    if usuario_id:
-        query += " AND t.usuario_id = %s"
-        params.append(usuario_id)
-    
-    cur.execute(query, params)
-    transacoes_recorrentes = cur.fetchall()
-    
-    colunas = ['id', 'data_registro', 'data_pagamento', 'pessoa', 'categoria', 'tipo', 
-               'valor', 'descricao', 'recorrente', 'dia_fixo', 'pessoa_responsavel', 
-               'no_cartao', 'investimento', 'vr', 'forma_pagamento', 'parcelas', 
-               'parcela_atual', 'status', 'usuario_id', 'grupo', 'compartilhado',
-               'grupo_usuario', 'compartilhado_usuario']
-    
-    hoje = date.today()
-    novas_transacoes = 0
-    
-    for transacao in transacoes_recorrentes:
-        transacao_dict = dict(transacao)
-        
-        data_registro_original = transacao_dict['data_registro']
-        data_pagamento_original = transacao_dict['data_pagamento']
-        descricao_original = transacao_dict['descricao']
-        dia_fixo = transacao_dict.get('dia_fixo')
-        valor = transacao_dict['valor']
-        categoria = transacao_dict['categoria']
-        tipo = transacao_dict['tipo']
-        forma_pagamento = transacao_dict['forma_pagamento']
-        no_cartao = transacao_dict.get('no_cartao', 0)
-        usuario_id_trans = transacao_dict.get('usuario_id')
-        grupo_usuario = transacao_dict.get('grupo', 'padrao')
-        compartilhado_usuario = transacao_dict.get('compartilhado', 0)
-        
-        if isinstance(data_registro_original, str):
-            try:
-                data_registro_original = date.fromisoformat(data_registro_original)
-            except:
-                data_registro_original = date.today()
-        if isinstance(data_pagamento_original, str):
-            try:
-                data_pagamento_original = date.fromisoformat(data_pagamento_original)
-            except:
-                data_pagamento_original = date.today()
-        
-        if not dia_fixo:
-            dia_fixo = data_pagamento_original.day if data_pagamento_original else 1
-        
-        try:
-            meses_passados = (hoje.year - data_pagamento_original.year) * 12 + (hoje.month - data_pagamento_original.month)
-        except:
-            meses_passados = 0
-        
-        for meses in range(1, meses_passados + 1):
-            ano = data_pagamento_original.year + (data_pagamento_original.month + meses - 1) // 12
-            mes_num = (data_pagamento_original.month + meses - 1) % 12 + 1
-            
-            try:
-                ultimo_dia_mes = calendar.monthrange(ano, mes_num)[1]
-                dia = min(int(dia_fixo), ultimo_dia_mes)
-                
-                data_pagamento_virtual = date(ano, mes_num, dia)
-                
-                if data_pagamento_virtual <= hoje and data_pagamento_virtual > data_pagamento_original:
-                    cur.execute("""
-                        SELECT COUNT(*) FROM transacoes 
-                        WHERE descricao LIKE %s 
-                        AND EXTRACT(YEAR FROM data_pagamento) = %s
-                        AND EXTRACT(MONTH FROM data_pagamento) = %s
-                        AND recorrente = 1
-                        AND usuario_id = %s
-                    """, (f"%{descricao_original}%", data_pagamento_virtual.year, data_pagamento_virtual.month, usuario_id_trans))
-                    
-                    existe = cur.fetchone()['count']
-                    
-                    if not existe:
-                        nova_descricao = f"{descricao_original} ({data_pagamento_virtual.strftime('%m/%Y')})"
-                        data_registro_nova = hoje
-                        
-                        if no_cartao:
-                            data_pagamento_final = ajustar_para_fatura(data_pagamento_virtual, dia_fatura=config.get("dia_fatura", 10))
-                        else:
-                            data_pagamento_final = data_pagamento_virtual
-                        
-                        dados_insercao = {
-                            'data_registro': data_registro_nova,
-                            'data_pagamento': data_pagamento_final,
-                            'pessoa': transacao_dict.get('pessoa', 'Ambos'),
-                            'categoria': categoria,
-                            'tipo': tipo,
-                            'valor': valor,
-                            'descricao': nova_descricao,
-                            'recorrente': 1,
-                            'dia_fixo': dia_fixo,
-                            'pessoa_responsavel': transacao_dict.get('pessoa_responsavel', 'Ambos'),
-                            'no_cartao': no_cartao,
-                            'investimento': transacao_dict.get('investimento', 0),
-                            'vr': transacao_dict.get('vr', 0),
-                            'forma_pagamento': forma_pagamento,
-                            'parcelas': transacao_dict.get('parcelas', 1),
-                            'parcela_atual': transacao_dict.get('parcela_atual', 1),
-                            'status': 'Ativa',
-                            'usuario_id': usuario_id_trans,
-                            'grupo': grupo_usuario,
-                            'compartilhado': compartilhado_usuario
-                        }
-                        
-                        colunas_insert = list(dados_insercao.keys())
-                        valores_insert = list(dados_insercao.values())
-                        
-                        placeholders = ', '.join(['%s'] * len(colunas_insert))
-                        colunas_str = ', '.join(colunas_insert)
-                        
-                        cur.execute(f"""
-                            INSERT INTO transacoes ({colunas_str})
-                            VALUES ({placeholders})
-                        """, valores_insert)
-                        
-                        novas_transacoes += 1
-            except Exception as e:
-                st.error(f"Erro ao processar recorrência: {e}")
-                continue
-    
-    conn.commit()
-    conn.close()
-    
-    return novas_transacoes
-
-def excluir_transacao(transacao_id, usuario_id=None):
-    conn = get_conn()
-    cur = conn.cursor()
+    """Processa transações recorrentes automaticamente"""
+    session = get_session()
+    if session is None:
+        return 0
     
     try:
-        query = "UPDATE transacoes SET status = 'Excluída' WHERE id = %s"
-        params = [transacao_id]
+        hoje = date.today()
+        novas_transacoes = 0
+        
+        # Buscar transações recorrentes
+        query = session.query(Transacao).filter(
+            Transacao.recorrente == 1,
+            (Transacao.status != 'Excluída') | (Transacao.status.is_(None))
+        )
         
         if usuario_id:
-            query += " AND usuario_id = %s"
-            params.append(usuario_id)
+            query = query.filter(Transacao.usuario_id == usuario_id)
         
-        cur.execute(query, params)
-        conn.commit()
-        return True
+        transacoes_recorrentes = query.all()
+        
+        for transacao in transacoes_recorrentes:
+            data_pagamento_original = transacao.data_pagamento
+            descricao_original = transacao.descricao
+            dia_fixo = transacao.dia_fixo
+            valor = transacao.valor
+            categoria = transacao.categoria
+            tipo = transacao.tipo
+            forma_pagamento = transacao.forma_pagamento
+            no_cartao = transacao.no_cartao
+            usuario_id_trans = transacao.usuario_id
+            grupo_usuario = transacao.grupo if transacao.grupo else "padrao"
+            compartilhado_usuario = transacao.compartilhado
+            
+            if not dia_fixo:
+                dia_fixo = data_pagamento_original.day if data_pagamento_original else 1
+            
+            try:
+                meses_passados = (hoje.year - data_pagamento_original.year) * 12 + (hoje.month - data_pagamento_original.month)
+            except:
+                meses_passados = 0
+            
+            for meses in range(1, meses_passados + 1):
+                ano = data_pagamento_original.year + (data_pagamento_original.month + meses - 1) // 12
+                mes_num = (data_pagamento_original.month + meses - 1) % 12 + 1
+                
+                try:
+                    ultimo_dia_mes = calendar.monthrange(ano, mes_num)[1]
+                    dia = min(int(dia_fixo), ultimo_dia_mes)
+                    
+                    data_pagamento_virtual = date(ano, mes_num, dia)
+                    
+                    if data_pagamento_virtual <= hoje and data_pagamento_virtual > data_pagamento_original:
+                        # Verificar se já existe transação para este mês
+                        existe = session.query(Transacao).filter(
+                            Transacao.descricao.like(f"%{descricao_original}%"),
+                            Transacao.data_pagamento >= date(data_pagamento_virtual.year, data_pagamento_virtual.month, 1),
+                            Transacao.data_pagamento <= date(data_pagamento_virtual.year, data_pagamento_virtual.month, ultimo_dia_mes),
+                            Transacao.recorrente == 1,
+                            Transacao.usuario_id == usuario_id_trans
+                        ).first()
+                        
+                        if not existe:
+                            nova_descricao = f"{descricao_original} ({data_pagamento_virtual.strftime('%m/%Y')})"
+                            data_registro_nova = hoje
+                            
+                            if no_cartao:
+                                data_pagamento_final = ajustar_para_fatura(data_pagamento_virtual, dia_fatura=config.get("dia_fatura", 10))
+                            else:
+                                data_pagamento_final = data_pagamento_virtual
+                            
+                            nova_transacao = Transacao(
+                                data_registro=data_registro_nova,
+                                data_pagamento=data_pagamento_final,
+                                pessoa=transacao.pessoa,
+                                categoria=categoria,
+                                tipo=tipo,
+                                valor=valor,
+                                descricao=nova_descricao,
+                                recorrente=1,
+                                dia_fixo=dia_fixo,
+                                pessoa_responsavel=transacao.pessoa_responsavel,
+                                no_cartao=no_cartao,
+                                investimento=transacao.investimento,
+                                vr=transacao.vr,
+                                forma_pagamento=forma_pagamento,
+                                parcelas=transacao.parcelas,
+                                parcela_atual=transacao.parcela_atual,
+                                status='Ativa',
+                                usuario_id=usuario_id_trans,
+                                grupo=grupo_usuario,
+                                compartilhado=compartilhado_usuario
+                            )
+                            
+                            session.add(nova_transacao)
+                            novas_transacoes += 1
+                except Exception as e:
+                    st.error(f"Erro ao processar recorrência: {e}")
+                    continue
+        
+        session.commit()
+        return novas_transacoes
     except Exception as e:
+        session.rollback()
+        st.error(f"Erro ao processar recorrências: {e}")
+        return 0
+    finally:
+        session.close()
+
+def excluir_transacao(transacao_id, usuario_id=None):
+    """Exclui uma transação (marca como excluída)"""
+    session = get_session()
+    if session is None:
+        return False
+    
+    try:
+        query = session.query(Transacao).filter_by(id=transacao_id)
+        
+        if usuario_id:
+            query = query.filter_by(usuario_id=usuario_id)
+        
+        transacao = query.first()
+        
+        if transacao:
+            transacao.status = 'Excluída'
+            session.commit()
+            return True
+        else:
+            return False
+    except Exception as e:
+        session.rollback()
         st.error(f"Erro ao excluir transação: {e}")
         return False
     finally:
-        conn.close()
+        session.close()
 
 def editar_transacao(transacao_id, novos_dados, usuario_id=None):
-    conn = get_conn()
-    cur = conn.cursor()
+    """Edita uma transação existente"""
+    session = get_session()
+    if session is None:
+        return False, "Erro de conexão com o banco"
     
     try:
-        date_fields = ['data_registro', 'data_pagamento']
-        for field in date_fields:
-            if field in novos_dados and hasattr(novos_dados[field], 'isoformat'):
-                novos_dados[field] = novos_dados[field].isoformat()
-        
-        campos = []
-        valores = []
-        
-        for campo, valor in novos_dados.items():
-            if valor is not None and valor != '':
-                campos.append(f"{campo} = %s")
-                valores.append(valor)
-        
-        if not campos:
-            return False, "Nenhum campo válido para atualizar"
-        
-        # Adicionar condições
-        query_condicoes = " WHERE id = %s"
-        valores.append(transacao_id)
+        query = session.query(Transacao).filter_by(id=transacao_id)
         
         if usuario_id:
-            query_condicoes += " AND usuario_id = %s"
-            valores.append(usuario_id)
+            query = query.filter_by(usuario_id=usuario_id)
         
-        query = f"UPDATE transacoes SET {', '.join(campos)} {query_condicoes}"
-        cur.execute(query, valores)
-        conn.commit()
+        transacao = query.first()
         
-        # No PostgreSQL, rowcount mostra quantas linhas foram afetadas
-        changes = cur.rowcount
+        if not transacao:
+            return False, "Transação não encontrada"
         
-        if changes > 0:
-            return True, "Transação atualizada com sucesso"
-        else:
-            return True, "Nenhuma alteração necessária"
-            
+        # Atualizar campos
+        for campo, valor in novos_dados.items():
+            if valor is not None and valor != '':
+                setattr(transacao, campo, valor)
+        
+        session.commit()
+        return True, "Transação atualizada com sucesso"
     except Exception as e:
-        error_msg = f"Erro ao editar transação: {str(e)}"
-        return False, error_msg
+        session.rollback()
+        return False, f"Erro ao editar transação: {str(e)}"
     finally:
-        conn.close()
+        session.close()
 
 def ler_categorias_formas():
+    """Lê categorias e formas de pagamento do arquivo Excel"""
     categorias_default = ["Alimentação", "Aluguel", "Bebidas", "Estética", "Cabeleireiro", "Calçados", "Combustível", "Contas", "Delivery", "Educação", "Emergenciais", "Entretenimento", "Estacionamento",
                           "Estudos", "Fatura", "Gasolina", "Imprevistos", "Hobbies", "Impostos", "Internet", "Investimento", "Jogos", "Lazer", "Luz", "Mercado", "Moradia", "Narguile", "Outros", "Pessoal",
                           "Pet", "Presentes", "Rendimentos", "Roupas", "Salario", "Saúde", "Serviços", "Streaming", "Supermercado", "Transporte", "Viagens"]
     formas_default = ["Dinheiro", "Débito", "Crédito", "Transferência", "Pix", "Boleto"]
+    
     if not EXCEL_APOIO.exists():
         return categorias_default, formas_default
+    
     try:
         df = pd.read_excel(EXCEL_APOIO, sheet_name=APOIO_SHEET)
         categorias = df.iloc[:, 0].dropna().astype(str).unique().tolist()
@@ -1066,6 +962,7 @@ def ler_categorias_formas():
         return categorias_default, formas_default
 
 def validar_transacao(data_registro, data_pagamento, descricao, valor, categoria):
+    """Valida os dados de uma transação"""
     erros = []
     
     if not descricao or descricao.strip() == "":
@@ -1094,7 +991,7 @@ if 'pagina_atual' not in st.session_state:
 if 'form_criar_usuario_submitted' not in st.session_state:
     st.session_state.form_criar_usuario_submitted = False
 
-# ---------- Página de Login Melhorada ----------
+# ---------- Páginas da Aplicação ----------
 def pagina_login():
     st.title("🔐 Login - Financeiro Familiar")
     
@@ -1104,14 +1001,12 @@ def pagina_login():
         with st.container():
             st.markdown("### Acesse sua conta")
             
-            # Verificar se auth está inicializado
             if auth is None:
                 st.error("❌ Sistema não inicializado. Recarregue a página.")
                 if st.button("🔄 Recarregar"):
                     st.rerun()
                 return
             
-            # Mensagem informativa
             with st.expander("ℹ️ Informações de acesso"):
                 st.info("""                
                 **⚠️ Importante:**
@@ -1173,7 +1068,6 @@ def pagina_alterar_senha():
         with st.container():
             st.markdown("### Redefinir Senha")
             
-            # Verificar se auth está inicializado
             if auth is None:
                 st.error("❌ Sistema não inicializado. Volte para o login.")
                 if st.button("↩️ Voltar para Login"):
@@ -1186,7 +1080,6 @@ def pagina_alterar_senha():
             nova_senha = st.text_input("Nova Senha", type="password", key="alterar_nova_senha")
             confirmar_senha = st.text_input("Confirmar Nova Senha", type="password", key="alterar_confirmar_senha")
             
-            # Validação de força da senha
             if nova_senha:
                 valida, msg = auth.validar_senha(nova_senha)
                 if valida:
@@ -1203,7 +1096,6 @@ def pagina_alterar_senha():
                     elif nova_senha != confirmar_senha:
                         st.error("⚠️ As senhas não coincidem")
                     else:
-                        # Validar força da senha
                         valida, msg = auth.validar_senha(nova_senha)
                         if not valida:
                             st.error(f"❌ {msg}")
@@ -1222,49 +1114,7 @@ def pagina_alterar_senha():
                     st.session_state.pagina_atual = "login"
                     st.rerun()
 
-def pagina_recuperar_senha():
-    st.title("🔑 Recuperação de Senha")
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        with st.container():
-            st.markdown("### Redefinir Senha")
-            
-            # Verificar se auth está inicializado
-            if auth is None:
-                st.error("❌ Sistema não inicializado. Volte para o login.")
-                if st.button("↩️ Voltar para Login"):
-                    st.session_state.pagina_atual = "login"
-                    st.rerun()
-                return
-            
-            username = st.text_input("Usuário", key="recuperar_username")
-            senha_atual = st.text_input("Senha Atual", type="password", key="recuperar_senha_atual")
-            nova_senha = st.text_input("Nova Senha", type="password", key="recuperar_nova_senha")
-            confirmar_senha = st.text_input("Confirmar Nova Senha", type="password", key="recuperar_confirmar_senha")
-            
-            if st.button("Alterar Senha", type="primary", use_container_width=True):
-                if not all([username, senha_atual, nova_senha, confirmar_senha]):
-                    st.error("Preencha todos os campos")
-                elif nova_senha != confirmar_senha:
-                    st.error("As senhas não coincidem")
-                else:
-                    sucesso, mensagem = auth.alterar_senha(username, senha_atual, nova_senha)
-                    if sucesso:
-                        st.success(mensagem)
-                        st.session_state.pagina_atual = "login"
-                        st.rerun()
-                    else:
-                        st.error(mensagem)
-            
-            if st.button("Voltar para Login", use_container_width=True):
-                st.session_state.pagina_atual = "login"
-                st.rerun()
-
-# ---------- Página Principal ----------
 def pagina_principal():
-    # Verificar se auth está inicializado
     if auth is None:
         st.error("❌ Sistema não inicializado. Faça login novamente.")
         if st.button("🚪 Voltar para Login"):
@@ -1276,7 +1126,7 @@ def pagina_principal():
             st.rerun()
         return
     
-    # Barra lateral com informações do usuário
+    # Barra lateral
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.usuario}")
         st.markdown(f"**Tipo:** {st.session_state.tipo_usuario}")
@@ -1310,9 +1160,8 @@ def pagina_principal():
                 st.success(f"🔄 {novas_transacoes} transações recorrentes criadas!")
         except Exception as e:
             st.error(f"⚠️ Erro ao processar recorrências: {e}")
-            st.error(traceback.format_exc())
     
-    # Conteúdo principal baseado na seleção do menu
+    # Conteúdo principal
     if menu == "📊 Dashboard":
         pagina_dashboard()
     elif menu == "➕ Novo Registro":
@@ -1328,7 +1177,6 @@ def pagina_principal():
     elif menu == "⚙️ Configurações" and st.session_state.tipo_usuario == "ADM":
         pagina_configuracoes()
 
-# ---------- Páginas Específicas ----------
 def pagina_dashboard():
     st.title("📊 Dashboard Financeiro")
     
@@ -1338,7 +1186,6 @@ def pagina_dashboard():
         st.info("📝 Nenhuma transação cadastrada ainda.")
         return
     
-    # Métricas do mês atual
     hoje = datetime.now()
     mes_atual = hoje.month
     ano_atual = hoje.year
@@ -1362,7 +1209,6 @@ def pagina_dashboard():
         cor_saldo = "normal" if saldo_mes >= 0 else "inverse"
         col3.metric("📊 Saldo do Mês", f"R$ {saldo_mes:,.2f}", delta_color=cor_saldo)
         
-        # Gráfico de despesas por categoria
         st.subheader("📈 Distribuição de Despesas por Categoria")
         
         df_despesas = df_mes[df_mes['tipo'] == 'Despesa']
@@ -1373,7 +1219,6 @@ def pagina_dashboard():
                             title='Despesas por Categoria')
                 st.plotly_chart(fig, use_container_width=True)
         
-        # Últimas transações
         st.subheader("🔄 Últimas Transações")
         df_ultimas = df.head(10).copy()
         
@@ -1418,18 +1263,18 @@ def pagina_novo_registro():
         
         st.markdown("**Data do Registro**")
         st.info("Data em que você está registrando esta transação no sistema")
-        data_registro = st.date_input("", value=date.today(), key="data_registro_novo", label_visibility="collapsed")
+        data_registro = st.date_input("Data do Registro", value=date.today(), key="data_registro_novo")
         
         st.markdown("**Data do Pagamento**")
         
         if no_cartao:
             st.info("Data em que a compra foi realizada no cartão")
-            data_compra = st.date_input("", value=date.today(), key="data_compra_novo", label_visibility="collapsed")
+            data_compra = st.date_input("Data da Compra", value=date.today(), key="data_compra_novo")
             data_pagamento = ajustar_para_fatura(data_compra, dia_fatura=config.get("dia_fatura", 10))
             st.success(f"**Fatura:** {data_pagamento.strftime('%d/%m/%Y')}")
         else:
             st.info("Data em que o pagamento foi/será realizado")
-            data_pagamento = st.date_input("", value=date.today(), key="data_pagamento_novo", label_visibility="collapsed")
+            data_pagamento = st.date_input("Data do Pagamento", value=date.today(), key="data_pagamento_novo")
     
     st.markdown("---")
     st.subheader("🔁 Opções de Pagamento")
@@ -1466,20 +1311,16 @@ def pagina_novo_registro():
                 mensagem = ""
                 
                 if opcao_pagamento == "Parcelado":
-                    # Parcelado: criar múltiplos registros
                     valor_parcela = valor / parcelas
                     
                     for i in range(parcelas):
-                        # Calcular data de cada parcela
                         if no_cartao:
-                            # Para crédito: cada parcela tem sua própria data de compra
                             ano_compra = data_compra.year + (data_compra.month + i - 1) // 12
                             mes_compra = (data_compra.month + i - 1) % 12 + 1
                             dia_compra = min(data_compra.day, calendar.monthrange(ano_compra, mes_compra)[1])
                             data_compra_parcela = date(ano_compra, mes_compra, dia_compra)
                             data_pagamento_parcela = ajustar_para_fatura(data_compra_parcela, dia_fatura=config.get("dia_fatura", 10))
                         else:
-                            # Para outras formas: parcelas no mesmo dia do mês
                             ano_pag = data_pagamento.year + (data_pagamento.month + i - 1) // 12
                             mes_pag = (data_pagamento.month + i - 1) % 12 + 1
                             dia_pag = min(data_pagamento.day, calendar.monthrange(ano_pag, mes_pag)[1])
@@ -1500,7 +1341,6 @@ def pagina_novo_registro():
                     mensagem = f"✅ {parcelas} parcelas de R$ {valor_parcela:,.2f} registradas com sucesso!"
                 
                 elif opcao_pagamento == "Recorrente":
-                    # Recorrente: criar 1 registro com flag de recorrência
                     extra_fields = {
                         "recorrente": 1,
                         "dia_fixo": dia_fixo,
@@ -1514,7 +1354,6 @@ def pagina_novo_registro():
                     st.info("🔄 As recorrências futuras serão criadas automaticamente!")
                 
                 else:
-                    # À vista: criar 1 registro normal
                     extra_fields = {
                         "no_cartao": 1 if no_cartao else 0
                     }
@@ -1524,13 +1363,11 @@ def pagina_novo_registro():
                                     extra_fields, st.session_state.usuario_id)
                     mensagem = f"✅ {tipo} registrada com sucesso!"
                 
-                # Armazenar mensagem de sucesso
                 st.session_state.success_message = mensagem
                 st.rerun()
                     
             except Exception as e:
                 st.error(f"❌ Erro ao salvar: {str(e)}")
-                st.error(traceback.format_exc())
 
 def pagina_consultar_financas():
     st.header("📊 Consultar Finanças")
@@ -1541,7 +1378,6 @@ def pagina_consultar_financas():
         st.info("📝 Nenhuma transação cadastrada ainda.")
         return
     
-    # Filtros
     st.subheader("📅 Filtros")
     filtro_tipo = st.radio(
         "Filtrar por:",
@@ -1575,7 +1411,6 @@ def pagina_consultar_financas():
         _, formas = ler_categorias_formas()
         forma_sel = st.selectbox("Forma", ["Todas"] + formas, key="forma_filtro")
     
-    # Aplicar filtros
     df_filtrado = df.copy()
     
     if mes_sel != "Todos" and pd.api.types.is_datetime64_any_dtype(df_filtrado[coluna_filtro]):
@@ -1593,7 +1428,6 @@ def pagina_consultar_financas():
     if df_filtrado.empty:
         st.warning("🔍 Nenhum registro encontrado com os filtros selecionados.")
     else:
-        # Métricas
         total_receitas = df_filtrado[df_filtrado['tipo'] == 'Receita']['valor'].sum()
         total_despesas = df_filtrado[df_filtrado['tipo'] == 'Despesa']['valor'].sum()
         saldo = total_receitas - total_despesas
@@ -1605,7 +1439,6 @@ def pagina_consultar_financas():
         cor_saldo = "normal" if saldo >= 0 else "inverse"
         col_metrica3.metric("📊 Saldo", f"R$ {saldo:,.2f}", delta_color=cor_saldo)
         
-        # Gráficos
         if not df_filtrado.empty:
             col_graf1, col_graf2 = st.columns(2)
             
@@ -1623,7 +1456,6 @@ def pagina_consultar_financas():
                                  title='💳 Distribuição por Forma de Pagamento')
                     st.plotly_chart(fig2, use_container_width=True)
         
-        # Tabela
         st.subheader("📋 Registros Detalhados")
         
         df_display = df_filtrado.copy()
@@ -1871,13 +1703,13 @@ def pagina_gerenciar_transacoes():
                                 st.write(f"**Usuário:** {transacao['usuario_nome']}")
                         
                         with col2:
-                            if st.button("✏️ Editar", key=f"edit_btn_{transacao['id']}"):
+                            if st.button("✏️ Editar", key=f"edit_btn_{transacao['id']}_{idx}"):
                                 st.session_state.editando_id = transacao['id']
                                 st.session_state.editando_dados = {}
                                 st.rerun()
                         
                         with col3:
-                            if st.button("🗑️ Excluir", key=f"del_btn_{transacao['id']}"):
+                            if st.button("🗑️ Excluir", key=f"del_btn_{transacao['id']}_{idx}"):
                                 if excluir_transacao(transacao['id'], st.session_state.usuario_id):
                                     st.success("✅ Transação marcada como excluída!")
                                     st.rerun()
@@ -1889,7 +1721,6 @@ def pagina_gerenciar_usuarios():
         st.error("❌ Acesso restrito a administradores.")
         return
     
-    # Verificar se auth está inicializado
     if auth is None:
         st.error("❌ Sistema não inicializado.")
         return
@@ -1904,35 +1735,36 @@ def pagina_gerenciar_usuarios():
         else:
             st.subheader("📊 Usuários do Sistema")
             
-            for usuario in usuarios:
-                usuario_dict = dict(zip(colunas, usuario))
+            for idx, usuario in enumerate(usuarios):
+                user_key = f"user_{usuario['id']}_{idx}"
                 
-                with st.expander(f"{usuario_dict['username']} ({usuario_dict['tipo']})"):
+                with st.expander(f"{usuario['username']} ({usuario['tipo']})", key=f"exp_{user_key}"):
                     col1, col2, col3 = st.columns([2, 1, 1])
                     
                     with col1:
-                        st.write(f"**ID:** {usuario_dict['id']}")
-                        st.write(f"**Nome:** {usuario_dict['nome'] or 'Não informado'}")
-                        st.write(f"**Email:** {usuario_dict['email'] or 'Não informado'}")
-                        st.write(f"**Tipo:** {usuario_dict['tipo']}")
-                        st.write(f"**Grupo:** {usuario_dict['grupo'] or 'padrao'}")
-                        st.write(f"**Base:** {'Compartilhada' if usuario_dict['compartilhado'] == 1 else 'Separada'}")
-                        st.write(f"**Status:** {'✅ Ativo' if usuario_dict['ativo'] else '❌ Inativo'}")
-                        st.write(f"**Criado em:** {usuario_dict['data_criacao']}")
-                        st.write(f"**Último login:** {usuario_dict['data_ultimo_login'] or 'Nunca'}")
+                        st.write(f"**ID:** {usuario['id']}")
+                        st.write(f"**Nome:** {usuario['nome'] or 'Não informado'}")
+                        st.write(f"**Email:** {usuario['email'] or 'Não informado'}")
+                        st.write(f"**Tipo:** {usuario['tipo']}")
+                        st.write(f"**Grupo:** {usuario['grupo'] or 'padrao'}")
+                        st.write(f"**Base:** {'Compartilhada' if usuario['compartilhado'] == 1 else 'Separada'}")
+                        st.write(f"**Status:** {'✅ Ativo' if usuario['ativo'] else '❌ Inativo'}")
+                        st.write(f"**Criado em:** {usuario['data_criacao']}")
+                        st.write(f"**Último login:** {usuario['data_ultimo_login'] or 'Nunca'}")
                     
                     with col2:
-                        if usuario_dict['username'] != st.session_state.usuario:
+                        if usuario['username'] != st.session_state.usuario:
                             col_status, col_tipo = st.columns(2)
                             
                             with col_status:
+                                status_key = f"status_{user_key}"
                                 novo_status = st.checkbox(
                                     "Ativo", 
-                                    value=bool(usuario_dict['ativo']),
-                                    key=f"status_{usuario_dict['id']}"
+                                    value=bool(usuario['ativo']),
+                                    key=status_key
                                 )
-                                if novo_status != bool(usuario_dict['ativo']):
-                                    sucesso, msg = auth.alterar_status_usuario(usuario_dict['id'], novo_status)
+                                if novo_status != bool(usuario['ativo']):
+                                    sucesso, msg = auth.alterar_status_usuario(usuario['id'], novo_status)
                                     if sucesso:
                                         st.success(msg)
                                         st.rerun()
@@ -1940,14 +1772,15 @@ def pagina_gerenciar_usuarios():
                                         st.error(msg)
                             
                             with col_tipo:
+                                tipo_key = f"tipo_{user_key}"
                                 novotipo = st.selectbox(
                                     "Tipo",
                                     ["COMUM", "ADM"],
-                                    index=0 if usuario_dict['tipo'] == "COMUM" else 1,
-                                    key=f"tipo_{usuario_dict['id']}"
+                                    index=0 if usuario['tipo'] == "COMUM" else 1,
+                                    key=tipo_key
                                 )
-                                if novotipo != usuario_dict['tipo']:
-                                    sucesso, msg = auth.alterar_tipo_usuario(usuario_dict['id'], novotipo)
+                                if novotipo != usuario['tipo']:
+                                    sucesso, msg = auth.alterar_tipo_usuario(usuario['id'], novotipo)
                                     if sucesso:
                                         st.success(msg)
                                         st.rerun()
@@ -1955,25 +1788,29 @@ def pagina_gerenciar_usuarios():
                                         st.error(msg)
                     
                     with col3:
-                        if usuario_dict['username'] != st.session_state.usuario:
+                        if usuario['username'] != st.session_state.usuario:
                             st.subheader("Grupo/Base")
+                            
+                            grupo_key = f"grupo_{user_key}"
                             novo_grupo = st.text_input(
                                 "Grupo",
-                                value=usuario_dict['grupo'] or 'padrao',
-                                key=f"grupo_{usuario_dict['id']}"
+                                value=usuario['grupo'] or 'padrao',
+                                key=grupo_key
                             )
                             
+                            compart_key = f"compart_{user_key}"
                             novo_compartilhado = st.selectbox(
                                 "Base de dados",
                                 ["Separada", "Compartilhada"],
-                                index=0 if usuario_dict['compartilhado'] == 0 else 1,
-                                key=f"compart_{usuario_dict['id']}"
+                                index=0 if usuario['compartilhado'] == 0 else 1,
+                                key=compart_key
                             )
                             
-                            if st.button("Atualizar Grupo", key=f"upd_grupo_{usuario_dict['id']}"):
+                            upd_key = f"upd_grupo_{user_key}"
+                            if st.button("Atualizar Grupo", key=upd_key):
                                 compartilhado_int = 1 if novo_compartilhado == "Compartilhada" else 0
                                 sucesso, msg = auth.alterar_grupo_usuario(
-                                    usuario_dict['id'], novo_grupo, compartilhado_int
+                                    usuario['id'], novo_grupo, compartilhado_int
                                 )
                                 if sucesso:
                                     st.success(msg)
@@ -1981,12 +1818,11 @@ def pagina_gerenciar_usuarios():
                                 else:
                                     st.error(msg)
                         
-                        st.write("")  # Espaço
+                        st.write("")
     
     with tab2:
         st.subheader("➕ Criar Novo Usuário")
         
-        # Resetar estado se necessário
         if st.button("🔄 Limpar formulário"):
             st.session_state.form_criar_usuario_submitted = False
             st.rerun()
@@ -2019,7 +1855,6 @@ def pagina_gerenciar_usuarios():
                 elif senha != confirmar_senha:
                     st.error("As senhas não coincidem")
                 else:
-                    # Converter opção de compartilhamento
                     compartilhado_int = 1 if compartilhado.startswith("Compartilhada") else 0
                     
                     sucesso, mensagem, usuario_id = auth.criar_usuario(
@@ -2028,11 +1863,9 @@ def pagina_gerenciar_usuarios():
                     if sucesso:
                         st.success(f"✅ {mensagem} - ID: {usuario_id}")
                         st.session_state.form_criar_usuario_submitted = True
-                        # Não usar st.rerun() aqui para manter a mensagem visível
                     else:
                         st.error(f"❌ {mensagem}")
         
-        # Se o formulário foi enviado com sucesso, mostrar mensagem e opção para criar outro
         if st.session_state.form_criar_usuario_submitted:
             st.info("Usuário criado com sucesso! O formulário foi limpo.")
             if st.button("➕ Criar outro usuário"):
@@ -2042,7 +1875,6 @@ def pagina_gerenciar_usuarios():
 def pagina_minha_conta():
     st.header("🔧 Minha Conta")
     
-    # Verificar se auth está inicializado
     if auth is None:
         st.error("❌ Sistema não inicializado.")
         return
@@ -2113,47 +1945,34 @@ def pagina_configuracoes():
     with tab2:
         st.subheader("📊 Estatísticas do Sistema")
         
-        # Usar a conexão apropriada baseada no ambiente
-        conn = get_conn()
-        cur = conn.cursor()
+        session = get_session()
+        if session is None:
+            st.error("❌ Não foi possível conectar ao banco de dados")
+            return
         
         try:
             # Contar usuários
-            cur.execute("SELECT COUNT(*) FROM usuarios")
-            total_usuarios = cur.fetchone()['count'] if cur.rowcount > 0 else 0
-            
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'ADM'")
-            admins = cur.fetchone()['count'] if cur.rowcount > 0 else 0
-            
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'COMUM'")
-            comuns = cur.fetchone()['count'] if cur.rowcount > 0 else 0
+            total_usuarios = session.query(Usuario).count()
+            admins = session.query(Usuario).filter_by(tipo='ADM').count()
+            comuns = session.query(Usuario).filter_by(tipo='COMUM').count()
             
             # Contar transações
-            cur.execute("SELECT COUNT(*) FROM transacoes")
-            total_transacoes = cur.fetchone()['count'] if cur.rowcount > 0 else 0
-            
-            cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Receita'")
-            receitas = cur.fetchone()['count'] if cur.rowcount > 0 else 0
-            
-            cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Despesa'")
-            despesas = cur.fetchone()['count'] if cur.rowcount > 0 else 0
+            total_transacoes = session.query(Transacao).count()
+            receitas = session.query(Transacao).filter_by(tipo='Receita').count()
+            despesas = session.query(Transacao).filter_by(tipo='Despesa').count()
             
             # Contar grupos
-            cur.execute("SELECT COUNT(DISTINCT grupo) FROM usuarios")
-            total_grupos = cur.fetchone()['count'] if cur.rowcount > 0 else 0
+            total_grupos = session.query(Usuario.grupo).distinct().count()
             
             # Usuários por tipo de base
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 1")
-            compartilhados = cur.fetchone()['count'] if cur.rowcount > 0 else 0
-            
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 0")
-            separados = cur.fetchone()['count'] if cur.rowcount > 0 else 0
+            compartilhados = session.query(Usuario).filter_by(compartilhado=1).count()
+            separados = session.query(Usuario).filter_by(compartilhado=0).count()
             
         except Exception as e:
             st.error(f"Erro ao obter estatísticas: {e}")
             total_usuarios = admins = comuns = total_transacoes = receitas = despesas = total_grupos = compartilhados = separados = 0
         finally:
-            conn.close()
+            session.close()
         
         col1, col2 = st.columns(2)
         
@@ -2170,30 +1989,18 @@ def pagina_configuracoes():
             st.metric("🔄 Bases Compartilhadas", compartilhados)
             st.metric("🔒 Bases Separadas", separados)
 
-# ---------- Inicialização ----------
-# Inicializar arquivos apenas se for ambiente cloud
-if IS_RAILWAY or IS_STREAMLIT_CLOUD:
-    inicializar_arquivos_cloud()
-
 # ---------- Roteamento Principal ----------
 def main():
     try:
-        # ---------- Inicialização ----------
-        if IS_STREAMLIT_CLOUD:
-            inicializar_arquivos_cloud()
-        
-        # Verificar se auth foi inicializado
+        # Inicializar autenticação
         global auth
+        if auth is None:
+            auth = inicializar_sistema_completo()
+        
         if auth is None:
             st.error("❌ Falha crítica: Sistema de autenticação não inicializado.")
             st.info("Recarregue a página ou verifique os logs para mais detalhes.")
             return
-        
-        # Inicializar banco de dados
-        try:
-            auth._verificar_e_atualizar_estrutura_banco()
-        except Exception as e:
-            st.warning(f"⚠️ Aviso ao inicializar banco: {e}")
         
         if not st.session_state.autenticado:
             if st.session_state.pagina_atual == "login":
@@ -2206,11 +2013,9 @@ def main():
     except Exception as e:
         st.error(f"❌ Erro crítico no aplicativo: {e}")
         
-        # Mostrar botão de emergência
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🔄 Tentar Reiniciar"):
-                # Limpar caches e estado
                 try:
                     st.cache_data.clear()
                     st.session_state.clear()

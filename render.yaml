@@ -3,7 +3,12 @@ services:
     name: financeiro-familiar
     env: python
     plan: free
+    runtime: python
+    pythonVersion: "3.11.7"
     buildCommand: |
       pip install --upgrade pip setuptools wheel
-      pip install --only-binary :all: -r requirements.txt
+      pip install -r requirements.txt
     startCommand: streamlit run app.py --server.port=10000 --server.address=0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.7"

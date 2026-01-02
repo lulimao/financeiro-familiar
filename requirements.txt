@@ -1,5 +1,5 @@
 streamlit==1.30.0
-psycopg2-binary==2.9.9
 python-dotenv==1.0.0
-pandas==2.1.4
-SQLAlchemy==2.0.25
+# pandas==2.1.4  # COMENTE ESTA LINHA
+# SQLAlchemy==2.0.25  # COMENTE ESTA LINHA
+# psycopg2-binary==2.9.9  # COMENTE ESTA LINHA

@@ -20,8 +20,6 @@ print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
 print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
 print("=" * 60)
 
-st.write("Versão atualizada às: 13:30")
-
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 

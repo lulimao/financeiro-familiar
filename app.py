@@ -15,22 +15,20 @@ import traceback
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
 # ---------- DETECTAR AMBIENTE ----------
+IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') == 'true' or 'DATABASE_URL' in os.environ
 IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
-IS_RENDER = os.environ.get('RENDER') == 'true'
-IS_PYTHONANYWHERE = os.environ.get('PYTHONANYWHERE_SITE') is not None
 
-if IS_RENDER:
-    # Render.com - usar diretório de trabalho atual
-    BASE_DIR = Path(".") / "data"
-    print("✅ Ambiente: Render.com (usando diretório atual)")
+if IS_RAILWAY:
+    # Railway.com com PostgreSQL
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    import urllib.parse as urlparse
+    BASE_DIR = Path("/app/data")
+    print("✅ Ambiente: Railway.com (PostgreSQL ativado)")
 elif IS_STREAMLIT_CLOUD:
     # Streamlit Cloud (temporário)
     BASE_DIR = Path("/tmp") if os.path.exists("/tmp") else Path(".")
     print("⚠️ Ambiente: Streamlit Cloud (dados temporários)")
-elif IS_PYTHONANYWHERE:
-    # PythonAnywhere
-    BASE_DIR = Path("/home/seu_usuario/data")  # Substitua pelo seu usuário
-    print("🌐 Ambiente: PythonAnywhere")
 else:
     # Desenvolvimento local
     BASE_DIR = Path(".")
@@ -52,10 +50,42 @@ import time
 
 def get_conn(max_retries=3, retry_delay=1):
     """Obtém conexão com retry em caso de falha"""
+    # Verifica se temos DATABASE_URL (Railway) ou usamos SQLite
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    
+    if DATABASE_URL:
+        # PostgreSQL no Railway
+        for attempt in range(max_retries):
+            try:
+                # Parse da URL do PostgreSQL
+                result = urlparse.urlparse(DATABASE_URL)
+                
+                conn = psycopg2.connect(
+                    database=result.path[1:],
+                    user=result.username,
+                    password=result.password,
+                    host=result.hostname,
+                    port=result.port,
+                    cursor_factory=RealDictCursor
+                )
+                print("✅ Conectado ao PostgreSQL no Railway")
+                return conn
+            except psycopg2.OperationalError as e:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                else:
+                    print(f"❌ Erro ao conectar ao PostgreSQL: {e}")
+                    # Fallback para SQLite se PostgreSQL falhar
+                    break
+        # Se chegou aqui, PostgreSQL falhou, usa SQLite
+        print("⚠️ PostgreSQL falhou, usando SQLite como fallback")
+    
+    # SQLite local/fallback
     for attempt in range(max_retries):
         try:
             conn = sqlite3.connect(
-                str(DB_FILE),  # AGORA DB_FILE está definido
+                str(DB_FILE),
                 detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
                 timeout=30,
                 check_same_thread=False
@@ -63,6 +93,7 @@ def get_conn(max_retries=3, retry_delay=1):
             # Configurações para melhor performance
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
+            print("✅ Conectado ao SQLite local")
             return conn
         except sqlite3.OperationalError as e:
             if "locked" in str(e) and attempt < max_retries - 1:
@@ -75,33 +106,119 @@ def ensure_tables_exist():
     conn = get_conn()
     cur = conn.cursor()
     
-    # Tabela de transações
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS transacoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data_registro DATE,
-            data_pagamento DATE,
-            pessoa TEXT,
-            categoria TEXT,
-            tipo TEXT,
-            valor REAL,
-            descricao TEXT,
-            recorrente INTEGER DEFAULT 0,
-            dia_fixo INTEGER,
-            pessoa_responsavel TEXT DEFAULT 'Ambos',
-            no_cartao INTEGER DEFAULT 0,
-            investimento INTEGER DEFAULT 0,
-            vr INTEGER DEFAULT 0,
-            forma_pagamento TEXT DEFAULT 'Dinheiro',
-            parcelas INTEGER DEFAULT 1,
-            parcela_atual INTEGER DEFAULT 1,
-            status TEXT DEFAULT 'Ativa',
-            usuario_id INTEGER,
-            grupo TEXT DEFAULT 'padrao',
-            compartilhado INTEGER DEFAULT 0,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-        )
-    """)
+    # Verifica se estamos usando PostgreSQL
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    is_postgres = DATABASE_URL is not None
+    
+    if is_postgres:
+        print("🔄 Criando tabelas no PostgreSQL...")
+        
+        # Tabela de transações para PostgreSQL
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS transacoes (
+                id SERIAL PRIMARY KEY,
+                data_registro DATE,
+                data_pagamento DATE,
+                pessoa TEXT,
+                categoria TEXT,
+                tipo TEXT,
+                valor REAL,
+                descricao TEXT,
+                recorrente INTEGER DEFAULT 0,
+                dia_fixo INTEGER,
+                pessoa_responsavel TEXT DEFAULT 'Ambos',
+                no_cartao INTEGER DEFAULT 0,
+                investimento INTEGER DEFAULT 0,
+                vr INTEGER DEFAULT 0,
+                forma_pagamento TEXT DEFAULT 'Dinheiro',
+                parcelas INTEGER DEFAULT 1,
+                parcela_atual INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'Ativa',
+                usuario_id INTEGER,
+                grupo TEXT DEFAULT 'padrao',
+                compartilhado INTEGER DEFAULT 0
+            )
+        """)
+        
+        # Tabela de usuários para PostgreSQL
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                senha_hash VARCHAR(255) NOT NULL,
+                tipo VARCHAR(10) NOT NULL DEFAULT 'COMUM',
+                nome VARCHAR(100),
+                email VARCHAR(100),
+                ativo BOOLEAN DEFAULT TRUE,
+                grupo VARCHAR(50) DEFAULT 'padrao',
+                compartilhado INTEGER DEFAULT 1,
+                pode_compartilhar INTEGER DEFAULT 0,
+                data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                data_ultimo_login TIMESTAMP
+            )
+        """)
+        
+        # Tabela de logs para PostgreSQL
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS logs_acesso (
+                id SERIAL PRIMARY KEY,
+                usuario_id INTEGER,
+                acao VARCHAR(50),
+                descricao TEXT,
+                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Adicionar foreign key se não existir
+        try:
+            cur.execute("""
+                ALTER TABLE transacoes 
+                ADD CONSTRAINT fk_usuario 
+                FOREIGN KEY (usuario_id) 
+                REFERENCES usuarios(id)
+            """)
+        except Exception:
+            pass  # Foreign key já existe
+        
+        try:
+            cur.execute("""
+                ALTER TABLE logs_acesso 
+                ADD CONSTRAINT fk_log_usuario 
+                FOREIGN KEY (usuario_id) 
+                REFERENCES usuarios(id)
+            """)
+        except Exception:
+            pass
+        
+    else:
+        # Código SQLite original (mantido)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS transacoes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data_registro DATE,
+                data_pagamento DATE,
+                pessoa TEXT,
+                categoria TEXT,
+                tipo TEXT,
+                valor REAL,
+                descricao TEXT,
+                recorrente INTEGER DEFAULT 0,
+                dia_fixo INTEGER,
+                pessoa_responsavel TEXT DEFAULT 'Ambos',
+                no_cartao INTEGER DEFAULT 0,
+                investimento INTEGER DEFAULT 0,
+                vr INTEGER DEFAULT 0,
+                forma_pagamento TEXT DEFAULT 'Dinheiro',
+                parcelas INTEGER DEFAULT 1,
+                parcela_atual INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'Ativa',
+                usuario_id INTEGER,
+                grupo TEXT DEFAULT 'padrao',
+                compartilhado INTEGER DEFAULT 0,
+                FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+            )
+        """)
+        
     
     # Verificar e adicionar colunas ausentes se necessário
     colunas_necessarias = [
@@ -128,6 +245,7 @@ def ensure_tables_exist():
     
     conn.commit()
     conn.close()
+    print("✅ Tabelas verificadas/criadas com sucesso!")
 
 # ---------- Inicialização dos arquivos no Cloud ----------
 def inicializar_arquivos_cloud():

@@ -1,7 +1,0 @@
-Estou desenvolvendo um sistema de registro financeiro baseado em uma planilha que utilizo, e gostaria de ajuda para implementar melhorias, o sistema foi desenvolvido em Python com Streamlite e sqlite3
-
-Melhorias
-
----
-
-Poderia me informar como poderia implementar e em caso de complexidade alta, pode enviar o código completo com a melhoria.

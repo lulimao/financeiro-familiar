@@ -11,6 +11,8 @@ import re
 import os
 import traceback
 
+#INICIO
+
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 

@@ -12,36 +12,14 @@ import re
 import os
 import traceback
 
-# Debug para Railway
-print("=" * 60)
-print(f"INICIANDO FINANCEIRO FAMILIAR")
-print(f"Porta: {os.environ.get('PORT', '8080')}")
-print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
-print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
-print("=" * 60)
+# ==================== HEALTHCHECK PARA RAILWAY (PASSO 3) ====================
+import http.server
+import socketserver
+import threading
 
-# Debug: Verificar variáveis de ambiente
-print("=" * 50)
-print(f"PORT: {os.environ.get('PORT')}")
-print(f"RAILWAY_ENVIRONMENT: {os.environ.get('RAILWAY_ENVIRONMENT')}")
-print(f"DATABASE_URL: {'Definida' if os.environ.get('DATABASE_URL') else 'Não definida'}")
-print("=" * 50)
-
-# Configurar porta do Railway
-PORT = int(os.environ.get("PORT", 8080))
-
-st.write("Versão atualizada às: 00h24") # mude para o horário que você fizer o push
-
-# Adicione no início do app.py, logo após as importações:
-from flask import Flask, Response
-import os
-
-# Criar um endpoint minimalista de healthcheck
-def create_healthcheck_endpoint():
-    """Cria um endpoint simples para healthcheck"""
-    import http.server
-    import socketserver
-    import threading
+def start_healthcheck_server():
+    """Inicia um servidor HTTP simples para healthcheck em uma porta diferente"""
+    PORT_HEALTH = 8081
     
     class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -54,21 +32,30 @@ def create_healthcheck_endpoint():
                 self.send_response(404)
                 self.end_headers()
     
-    def run_server():
-        port = int(os.environ.get('HEALTHCHECK_PORT', 8080))
-        with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
-            print(f"Healthcheck server running on port {port}")
-            httpd.serve_forever()
-    
-    # Iniciar em uma thread separada
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
+    with socketserver.TCPServer(("", PORT_HEALTH), HealthCheckHandler) as httpd:
+        print(f"✅ Healthcheck server running on port {PORT_HEALTH}")
+        httpd.serve_forever()
 
-# Iniciar healthcheck apenas no Railway
-if os.environ.get('RAILWAY_ENVIRONMENT') == 'true' or 'DATABASE_URL' in os.environ:
-    create_healthcheck_endpoint()
+# Iniciar o healthcheck apenas se estiver no Railway
+if os.environ.get('RAILWAY_ENVIRONMENT') == 'true' or os.environ.get('DATABASE_URL'):
+    healthcheck_thread = threading.Thread(target=start_healthcheck_server, daemon=True)
+    healthcheck_thread.start()
+    print("✅ Healthcheck server iniciado na porta 8081")
 
-#INICIO
+# ==================== FIM DO HEALTHCHECK ====================
+
+# Debug para Railway
+print("=" * 60)
+print(f"INICIANDO FINANCEIRO FAMILIAR")
+print(f"Porta: {os.environ.get('PORT', '8080')}")
+print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
+print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
+print("=" * 60)
+
+# Configurar porta do Railway
+PORT = int(os.environ.get("PORT", 8080))
+
+st.write("Versão atualizada às: 00h24") # mude para o horário que você fizer o push
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")

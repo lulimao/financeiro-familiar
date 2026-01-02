@@ -1,12 +1,16 @@
 #!/bin/bash
 
-# Configurar porta (Railway usa $PORT)
+# Configurar porta
 PORT=${PORT:-8080}
 
-echo "🚀 Iniciando Financeiro Familiar na porta: $PORT"
+echo "========================================"
+echo "🚀 INICIANDO FINANCEIRO FAMILIAR"
+echo "🌐 Porta: $PORT"
+echo "🏥 Healthcheck: / (raiz)"
+echo "========================================"
 
-# Executar Streamlit
-exec streamlit run app.py \
+# Iniciar Streamlit
+streamlit run app.py \
     --server.port=$PORT \
     --server.address=0.0.0.0 \
     --server.enableCORS=false \

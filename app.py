@@ -12,21 +12,31 @@ import re
 import os
 import traceback
 
-# Debug para Railway
+# ---------- DETECTAR AMBIENTE ----------
+# Verificar se estamos no Railway (produção)
+IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') in ['true', 'production'] or 'DATABASE_URL' in os.environ
+
+# Verificar se estamos no Streamlit Cloud (opcional)
+IS_STREAMLIT_CLOUD = 'STREAMLIT_CLOUD' in os.environ or 'STREAMLIT_SERVER_PORT' in os.environ
+
+# Ambiente local (fallback)
+IS_LOCAL = not (IS_RAILWAY or IS_STREAMLIT_CLOUD)
+
 print("=" * 60)
 print(f"INICIANDO FINANCEIRO FAMILIAR")
 print(f"Porta: {os.environ.get('PORT', '8080')}")
-print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
+print(f"Railway Environment: {'Sim' if IS_RAILWAY else 'Não'}")
+print(f"Streamlit Cloud: {'Sim' if IS_STREAMLIT_CLOUD else 'Não'}")
 print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
+print(f"Ambiente: {'Railway' if IS_RAILWAY else 'Streamlit Cloud' if IS_STREAMLIT_CLOUD else 'Local'}")
 print("=" * 60)
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
-# ---------- DETECTAR AMBIENTE E BANCO ----------
-IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') in ['true', 'production'] or 'DATABASE_URL' in os.environ
-
+# ---------- CONFIGURAR BANCO BASEADO NO AMBIENTE ----------
 if IS_RAILWAY:
+    print("🟢 Usando PostgreSQL (Railway)")
     import psycopg2
     from psycopg2.extras import RealDictCursor
     import urllib.parse as urlparse
@@ -37,22 +47,26 @@ if IS_RAILWAY:
         DATABASE_URL = raw_url.replace("postgres://", "postgresql://", 1)
     else:
         DATABASE_URL = raw_url
-        
-    BASE_DIR = Path(__file__).parent
 else:
-    # Local ou Streamlit Cloud
-    DATABASE_URL = os.environ.get('DATABASE_URL') # Ou sqlite
-    BASE_DIR = Path(__file__).parent
+    print("🟡 Usando SQLite (Local/Streamlit Cloud)")
+    DATABASE_URL = None
+
+BASE_DIR = Path(__file__).parent
+
+# ---------- DEFINIR ARQUIVOS ----------
+BASE_DIR = Path(__file__).parent
+CONFIG_FILE = BASE_DIR / "config.json"
+DB_FILE = BASE_DIR / "financeiro.db"
+EXCEL_APOIO = BASE_DIR / "planilha_apoio.xlsx"
+APOIO_SHEET = "Planilha apoio"
 
 # ---------- Banco ----------
 import time
 
 def get_conn(max_retries=3, retry_delay=1):
     """Obtém conexão com retry em caso de falha"""
-    # Verifica se temos DATABASE_URL (Railway) ou usamos SQLite
-    DATABASE_URL = os.environ.get('DATABASE_URL')
     
-    if DATABASE_URL:
+    if IS_RAILWAY and os.environ.get('DATABASE_URL'):
         # PostgreSQL no Railway
         for attempt in range(max_retries):
             try:
@@ -69,37 +83,33 @@ def get_conn(max_retries=3, retry_delay=1):
                 )
                 print("✅ Conectado ao PostgreSQL no Railway")
                 return conn
-            except psycopg2.OperationalError as e:
+            except Exception as e:
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay * (attempt + 1))
                     continue
                 else:
                     print(f"❌ Erro ao conectar ao PostgreSQL: {e}")
-                    # Fallback para SQLite se PostgreSQL falhar
-                    break
-        # Se chegou aqui, PostgreSQL falhou, usa SQLite
-        print("⚠️ PostgreSQL falhou, usando SQLite como fallback")
-    
-    # SQLite local/fallback
-    for attempt in range(max_retries):
-        try:
-            conn = sqlite3.connect(
-                str(DB_FILE),
-                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-                timeout=30,
-                check_same_thread=False
-            )
-            # Configurações para melhor performance
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            print("✅ Conectado ao SQLite local")
-            return conn
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-                continue
-            else:
-                raise e
+                    raise e  # No Railway, não fallback para SQLite
+    else:
+        # SQLite local/Streamlit Cloud
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect(
+                    str(DB_FILE),
+                    detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                    timeout=30,
+                    check_same_thread=False
+                )
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                print("✅ Conectado ao SQLite local")
+                return conn
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e) and attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                else:
+                    raise e
 
 def ensure_tables_exist():
     conn = get_conn()
@@ -249,17 +259,27 @@ def ensure_tables_exist():
 # ---------- Inicialização dos arquivos no Cloud ----------
 def inicializar_arquivos_cloud():
     """Criar arquivos necessários se não existirem no cloud"""
+    print(f"🔄 Inicializando arquivos para ambiente cloud")
     
     # Criar config.json se não existir
     if not CONFIG_FILE.exists():
         config_default = {"dia_fatura": 10}
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config_default, f, indent=2)
+        print(f"✅ config.json criado")
     
-    # Criar banco de dados se não existir
-    if not DB_FILE.exists():
-        ensure_tables_exist()  # AGORA ESTÁ DEFINIDA ANTES!
-        
+    # No Railway com PostgreSQL, não precisamos do arquivo SQLite
+    if not IS_RAILWAY:
+        # Criar banco SQLite se não existir (apenas para Streamlit Cloud/local)
+        if not DB_FILE.exists():
+            try:
+                # Criar conexão SQLite que criará o arquivo
+                conn = sqlite3.connect(str(DB_FILE))
+                conn.close()
+                print(f"✅ Arquivo SQLite criado: {DB_FILE}")
+            except Exception as e:
+                print(f"⚠️ Erro ao criar SQLite: {e}")
+    
     # Criar planilha exemplo se não existir
     if not EXCEL_APOIO.exists():
         try:
@@ -270,13 +290,17 @@ def inicializar_arquivos_cloud():
                                      'Transferência', 'Pix', 'Boleto']
             })
             df_exemplo.to_excel(EXCEL_APOIO, sheet_name='Planilha apoio', index=False)
+            print(f"✅ Planilha exemplo criada")
         except Exception as e:
-            st.warning(f"Não foi possível criar planilha exemplo: {e}")
+            print(f"⚠️ Não foi possível criar planilha exemplo: {e}")
+    
+    print(f"✅ Inicialização de arquivos concluída")
 
 print("=" * 50)
 print(f"Sistema Financeiro Familiar")
-print(f"Ambiente: {'Render.com' if IS_RENDER else 'Streamlit Cloud' if IS_STREAMLIT_CLOUD else 'Local'}")
-print(f"Banco de dados: {DB_FILE}")
+print(f"Ambiente: {'Railway' if IS_RAILWAY else 'Streamlit Cloud' if IS_STREAMLIT_CLOUD else 'Local'}")
+print(f"Banco: {'PostgreSQL' if IS_RAILWAY else 'SQLite'}")
+print(f"Arquivo DB: {DB_FILE}")
 print("=" * 50)
 
 # ---------- Sistema de Autenticação Melhorado ----------
@@ -2285,6 +2309,11 @@ def pagina_configuracoes():
             st.metric("📉 Despesas Registradas", despesas)
             st.metric("🔄 Bases Compartilhadas", compartilhados)
             st.metric("🔒 Bases Separadas", separados)
+
+            # ---------- Inicialização ----------
+# Inicializar arquivos apenas se for ambiente cloud
+if IS_RAILWAY or IS_STREAMLIT_CLOUD:
+    inicializar_arquivos_cloud()
 
 # ---------- Roteamento Principal ----------
 def main():

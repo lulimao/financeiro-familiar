@@ -218,10 +218,11 @@ def inicializar_arquivos_cloud():
     if not EXCEL_APOIO.exists():
         try:
             # Listas de exemplo com mesmo tamanho
-            categorias_list = ['Alimentação', 'Moradia', 'Transporte', 'Lazer', 
-                              'Saúde', 'Educação', 'Salário', 'Outros']
+            categorias_list = ['Alimentação', 'Aluguel', 'Bebidas', 'Estética', 'Cabeleireiro', 'Calçados', 'Combustível', 'Contas', 'Crédito Ca', 'Delivery', 'Educação', 'Emergenciais', 'Entretenimento',
+                               'Estacionamento', 'Estudos', 'Fatura', 'Gasolina', 'Imprevistos', 'Hobbies', 'Impostos', 'Internet', 'Investimento', 'Jogos', 'Lazer', 'Luz', 'Mercado', 'Moradia', 'Narguile',
+                               'Outros', 'Pessoal', 'Pet', 'Presentes', 'Rendimentos', 'Roupas', 'Salario', 'Saúde', 'Serviços', 'Streaming', 'Supermercado', 'Transporte', 'Viagens']
             formas_list = ['Dinheiro', 'Débito', 'Crédito', 
-                          'Transferência', 'Pix', 'Boleto', 'Pix', 'Pix']  # Mesmo tamanho
+                          'Transferência', 'Pix', 'Boleto', 'Pix', 'Pix']
             
             df_exemplo = pd.DataFrame({
                 'Categorias': categorias_list,

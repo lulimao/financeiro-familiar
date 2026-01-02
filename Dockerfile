@@ -2,41 +2,27 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar dependências do sistema
+# 1. Instalar dependências do sistema (essencial para psycopg2/PostgreSQL)
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     libpq-dev \
     python3-dev \
     build-essential \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar requirements
+# 2. Copiar apenas requirements para cache otimizado
 COPY requirements.txt .
-
-# Instalar dependências Python
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Copiar código
-COPY . .
-
-# Copiar entrypoint
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Expor porta
-EXPOSE 8080
-
-# Usar entrypoint
-ENTRYPOINT ["/entrypoint.sh"]
-
-# Garanta que o pip não use cache para evitar erros de espaço
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expor a porta que o Railway fornece (variável dinâmica)
-EXPOSE ${PORT}
+# 3. Copiar o resto do código
+COPY . .
 
-# Comando de inicialização direto (mais seguro que entrypoint.sh em alguns casos)
-CMD ["sh", "-c", "streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0"]
+# 4. Configurações do Streamlit para o Railway
+ENV STREAMLIT_SERVER_PORT=8080
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_SERVER_HEADLESS=true
+
+# O Railway usará a variável $PORT automaticamente
+CMD sh -c "streamlit run app.py --server.port=${PORT:-8080}"

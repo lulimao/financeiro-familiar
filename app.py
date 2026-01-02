@@ -25,37 +25,27 @@ st.write("Versão atualizada às: 01h20")
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
-# ---------- DETECTAR AMBIENTE ----------
+# ---------- DETECTAR AMBIENTE E BANCO ----------
 IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') == 'true' or 'DATABASE_URL' in os.environ
-IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
 
 if IS_RAILWAY:
-    # Railway.com com PostgreSQL
     import psycopg2
     from psycopg2.extras import RealDictCursor
     import urllib.parse as urlparse
-    BASE_DIR = Path("/app/data")
-    print("✅ Ambiente: Railway.com (PostgreSQL ativado)")
-elif IS_STREAMLIT_CLOUD:
-    # Streamlit Cloud (temporário)
-    BASE_DIR = Path("/tmp") if os.path.exists("/tmp") else Path(".")
-    print("⚠️ Ambiente: Streamlit Cloud (dados temporários)")
+    
+    # CORREÇÃO DA URL (postgres:// -> postgresql://)
+    raw_url = os.environ.get('DATABASE_URL')
+    if raw_url and raw_url.startswith("postgres://"):
+        DATABASE_URL = raw_url.replace("postgres://", "postgresql://", 1)
+    else:
+        DATABASE_URL = raw_url
+        
+    BASE_DIR = Path(__file__).parent
 else:
-    # Desenvolvimento local
-    BASE_DIR = Path(".")
-    print("💻 Ambiente: Desenvolvimento local")
-
-# Caminhos dos arquivos
-DB_FILE = BASE_DIR / "financeiro.db"
-EXCEL_APOIO = BASE_DIR / "Renda_2026.xlsx"
-CONFIG_FILE = BASE_DIR / "config.json"
-APOIO_SHEET = "Planilha apoio"
-
-# Criar diretório de dados se não existir
-if not BASE_DIR.exists():
-    BASE_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"📁 Diretório criado: {BASE_DIR}")
-
+    # Local ou Streamlit Cloud
+    DATABASE_URL = os.environ.get('DATABASE_URL') # Ou sqlite
+    BASE_DIR = Path(__file__).parent
+    
 # ---------- Banco ----------
 import time
 

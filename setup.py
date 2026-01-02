@@ -1,15 +1,28 @@
-from setuptools import setup, find_packages
+#!/usr/bin/env python3
+import os
+from pathlib import Path
 
-setup(
-    name="financeiro-familiar",
-    version="1.0.0",
-    packages=find_packages(),
-    install_requires=[
-        "streamlit>=1.30.0,<1.31",
-        "psycopg2-binary>=2.9.9,<2.10",
-        "python-dotenv>=1.0.0,<1.1",
-        "pandas>=2.1.4,<2.2",
-        "SQLAlchemy>=2.0.25,<2.1",
-    ],
-    python_requires=">=3.11",
-)
+def create_data_dir():
+    """Cria diretório de dados se não existir"""
+    base_dir = Path(".") / "data"
+    
+    if not base_dir.exists():
+        base_dir.mkdir(parents=True, exist_ok=True)
+        print(f"✅ Diretório criado: {base_dir}")
+    
+    # Verificar permissões
+    try:
+        test_file = base_dir / "test.txt"
+        test_file.write_text("test")
+        test_file.unlink()
+        print("✅ Permissões de escrita OK")
+    except Exception as e:
+        print(f"❌ Erro de permissão: {e}")
+        # Tentar criar em diretório alternativo
+        alt_dir = Path("/tmp") / "financeiro_data"
+        if not alt_dir.exists():
+            alt_dir.mkdir(parents=True, exist_ok=True)
+        print(f"✅ Usando diretório alternativo: {alt_dir}")
+
+if __name__ == "__main__":
+    create_data_dir()

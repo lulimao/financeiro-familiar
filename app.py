@@ -17,15 +17,20 @@ st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 # ---------- DETECTAR AMBIENTE ----------
 IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') == 'true'
 IS_RENDER = os.environ.get('RENDER') == 'true'
+IS_PYTHONANYWHERE = os.environ.get('PYTHONANYWHERE_SITE') is not None
 
 if IS_RENDER:
-    # Render.com com disco persistente
-    BASE_DIR = Path("/app/data")
-    print("✅ Ambiente: Render.com (disco persistente ativado)")
+    # Render.com - usar diretório de trabalho atual
+    BASE_DIR = Path(".") / "data"
+    print("✅ Ambiente: Render.com (usando diretório atual)")
 elif IS_STREAMLIT_CLOUD:
     # Streamlit Cloud (temporário)
     BASE_DIR = Path("/tmp") if os.path.exists("/tmp") else Path(".")
     print("⚠️ Ambiente: Streamlit Cloud (dados temporários)")
+elif IS_PYTHONANYWHERE:
+    # PythonAnywhere
+    BASE_DIR = Path("/home/seu_usuario/data")  # Substitua pelo seu usuário
+    print("🌐 Ambiente: PythonAnywhere")
 else:
     # Desenvolvimento local
     BASE_DIR = Path(".")

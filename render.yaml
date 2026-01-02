@@ -1,14 +1,18 @@
-services:
-  - type: web
-    name: financeiro-familiar
-    env: python
-    plan: free
-    runtime: python
-    pythonVersion: "3.11.7"
-    buildCommand: |
-      pip install --upgrade pip setuptools wheel
+services
+  - type web
+    name financeiro-familiar
+    env python
+    plan free
+    buildCommand 
       pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port=10000 --server.address=0.0.0.0
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.7"
+      python setup.py
+    startCommand streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+    envVars
+      - key RENDER
+        value true
+      - key PYTHONUNBUFFERED
+        value true
+      - key STREAMLIT_SERVER_HEADLESS
+        value true
+      - key STREAMLIT_SERVER_ENABLE_CORS
+        value false

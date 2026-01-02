@@ -1,5 +1,5 @@
 import streamlit as st
-import sqlite3
+import psycopg2
 import pandas as pd
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -11,6 +11,8 @@ import hashlib
 import re
 import os
 import traceback
+from psycopg2.extras import RealDictCursor
+import urllib.parse as urlparse
 
 # ---------- DETECTAR AMBIENTE ----------
 # Verificar se estamos no Railway (produção)
@@ -37,9 +39,6 @@ st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 # ---------- CONFIGURAR BANCO BASEADO NO AMBIENTE ----------
 if IS_RAILWAY:
     print("🟢 Usando PostgreSQL (Railway)")
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    import urllib.parse as urlparse
     
     # CORREÇÃO DA URL (postgres:// -> postgresql://)
     raw_url = os.environ.get('DATABASE_URL')
@@ -48,10 +47,8 @@ if IS_RAILWAY:
     else:
         DATABASE_URL = raw_url
 else:
-    print("🟡 Usando SQLite (Local/Streamlit Cloud)")
+    print("🟡 Usando PostgreSQL (Local/Streamlit Cloud)")
     DATABASE_URL = None
-
-BASE_DIR = Path(__file__).parent
 
 # ---------- DEFINIR ARQUIVOS ----------
 BASE_DIR = Path(__file__).parent
@@ -66,8 +63,8 @@ import time
 def get_conn(max_retries=3, retry_delay=1):
     """Obtém conexão com retry em caso de falha"""
     
-    if IS_RAILWAY and os.environ.get('DATABASE_URL'):
-        # PostgreSQL no Railway
+    # PostgreSQL
+    if DATABASE_URL:
         for attempt in range(max_retries):
             try:
                 # Parse da URL do PostgreSQL
@@ -81,7 +78,7 @@ def get_conn(max_retries=3, retry_delay=1):
                     port=result.port,
                     cursor_factory=RealDictCursor
                 )
-                print("✅ Conectado ao PostgreSQL no Railway")
+                print("✅ Conectado ao PostgreSQL")
                 return conn
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -89,168 +86,104 @@ def get_conn(max_retries=3, retry_delay=1):
                     continue
                 else:
                     print(f"❌ Erro ao conectar ao PostgreSQL: {e}")
-                    raise e  # No Railway, não fallback para SQLite
-    else:
-        # SQLite local/Streamlit Cloud
-        for attempt in range(max_retries):
-            try:
-                conn = sqlite3.connect(
-                    str(DB_FILE),
-                    detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-                    timeout=30,
-                    check_same_thread=False
-                )
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=5000")
-                print("✅ Conectado ao SQLite local")
-                return conn
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e) and attempt < max_retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
-                    continue
-                else:
                     raise e
 
 def ensure_tables_exist():
     conn = get_conn()
     cur = conn.cursor()
     
-    # Verifica se estamos usando PostgreSQL
-    DATABASE_URL = os.environ.get('DATABASE_URL')
-    is_postgres = DATABASE_URL is not None
+    print("🔄 Criando tabelas no PostgreSQL...")
     
-    if is_postgres:
-        print("🔄 Criando tabelas no PostgreSQL...")
-        
-        # Tabela de transações para PostgreSQL
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS transacoes (
-                id SERIAL PRIMARY KEY,
-                data_registro DATE,
-                data_pagamento DATE,
-                pessoa TEXT,
-                categoria TEXT,
-                tipo TEXT,
-                valor REAL,
-                descricao TEXT,
-                recorrente INTEGER DEFAULT 0,
-                dia_fixo INTEGER,
-                pessoa_responsavel TEXT DEFAULT 'Ambos',
-                no_cartao INTEGER DEFAULT 0,
-                investimento INTEGER DEFAULT 0,
-                vr INTEGER DEFAULT 0,
-                forma_pagamento TEXT DEFAULT 'Dinheiro',
-                parcelas INTEGER DEFAULT 1,
-                parcela_atual INTEGER DEFAULT 1,
-                status TEXT DEFAULT 'Ativa',
-                usuario_id INTEGER,
-                grupo TEXT DEFAULT 'padrao',
-                compartilhado INTEGER DEFAULT 0
-            )
-        """)
-        
-        # Tabela de usuários para PostgreSQL
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) UNIQUE NOT NULL,
-                senha_hash VARCHAR(255) NOT NULL,
-                tipo VARCHAR(10) NOT NULL DEFAULT 'COMUM',
-                nome VARCHAR(100),
-                email VARCHAR(100),
-                ativo BOOLEAN DEFAULT TRUE,
-                grupo VARCHAR(50) DEFAULT 'padrao',
-                compartilhado INTEGER DEFAULT 1,
-                pode_compartilhar INTEGER DEFAULT 0,
-                data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                data_ultimo_login TIMESTAMP
-            )
-        """)
-        
-        # Tabela de logs para PostgreSQL
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS logs_acesso (
-                id SERIAL PRIMARY KEY,
-                usuario_id INTEGER,
-                acao VARCHAR(50),
-                descricao TEXT,
-                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Adicionar foreign key se não existir
-        try:
-            cur.execute("""
-                ALTER TABLE transacoes 
-                ADD CONSTRAINT fk_usuario 
-                FOREIGN KEY (usuario_id) 
-                REFERENCES usuarios(id)
-            """)
-        except Exception:
-            pass  # Foreign key já existe
-        
-        try:
-            cur.execute("""
-                ALTER TABLE logs_acesso 
-                ADD CONSTRAINT fk_log_usuario 
-                FOREIGN KEY (usuario_id) 
-                REFERENCES usuarios(id)
-            """)
-        except Exception:
-            pass
-        
-    else:
-        # Código SQLite original (mantido)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS transacoes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                data_registro DATE,
-                data_pagamento DATE,
-                pessoa TEXT,
-                categoria TEXT,
-                tipo TEXT,
-                valor REAL,
-                descricao TEXT,
-                recorrente INTEGER DEFAULT 0,
-                dia_fixo INTEGER,
-                pessoa_responsavel TEXT DEFAULT 'Ambos',
-                no_cartao INTEGER DEFAULT 0,
-                investimento INTEGER DEFAULT 0,
-                vr INTEGER DEFAULT 0,
-                forma_pagamento TEXT DEFAULT 'Dinheiro',
-                parcelas INTEGER DEFAULT 1,
-                parcela_atual INTEGER DEFAULT 1,
-                status TEXT DEFAULT 'Ativa',
-                usuario_id INTEGER,
-                grupo TEXT DEFAULT 'padrao',
-                compartilhado INTEGER DEFAULT 0,
-                FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-            )
-        """)
-        
+    # Tabela de usuários para PostgreSQL
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50) UNIQUE NOT NULL,
+            senha_hash VARCHAR(255) NOT NULL,
+            tipo VARCHAR(10) NOT NULL DEFAULT 'COMUM',
+            nome VARCHAR(100),
+            email VARCHAR(100),
+            ativo BOOLEAN DEFAULT TRUE,
+            grupo VARCHAR(50) DEFAULT 'padrao',
+            compartilhado INTEGER DEFAULT 1,
+            pode_compartilhar INTEGER DEFAULT 0,
+            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            data_ultimo_login TIMESTAMP
+        )
+    """)
     
-    # Verificar e adicionar colunas ausentes se necessário
-    colunas_necessarias = [
-        'data_registro', 'data_pagamento', 'parcelas', 'parcela_atual', 'status',
-        'usuario_id', 'grupo', 'compartilhado'
-    ]
+    # Tabela de transações para PostgreSQL
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transacoes (
+            id SERIAL PRIMARY KEY,
+            data_registro DATE,
+            data_pagamento DATE,
+            pessoa TEXT,
+            categoria TEXT,
+            tipo TEXT,
+            valor REAL,
+            descricao TEXT,
+            recorrente INTEGER DEFAULT 0,
+            dia_fixo INTEGER,
+            pessoa_responsavel TEXT DEFAULT 'Ambos',
+            no_cartao INTEGER DEFAULT 0,
+            investimento INTEGER DEFAULT 0,
+            vr INTEGER DEFAULT 0,
+            forma_pagamento TEXT DEFAULT 'Dinheiro',
+            parcelas INTEGER DEFAULT 1,
+            parcela_atual INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'Ativa',
+            usuario_id INTEGER,
+            grupo TEXT DEFAULT 'padrao',
+            compartilhado INTEGER DEFAULT 0,
+            CONSTRAINT fk_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+        )
+    """)
     
-    for coluna in colunas_necessarias:
-        try:
-            if coluna == 'status':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'Ativa'")
-            elif coluna == 'usuario_id':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER")
-            elif coluna == 'grupo':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'padrao'")
-            elif coluna == 'compartilhado':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 0")
-            elif coluna in ['data_registro', 'data_pagamento']:
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} DATE")
-            else:
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass  # Coluna já existe
+    # Tabela de logs para PostgreSQL
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS logs_acesso (
+            id SERIAL PRIMARY KEY,
+            usuario_id INTEGER,
+            acao VARCHAR(50),
+            descricao TEXT,
+            data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+        )
+    """)
+    
+    # Verificar e adicionar colunas ausentes se necessário (PostgreSQL)
+    try:
+        # Verificar colunas na tabela transacoes
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'transacoes'
+        """)
+        colunas_existentes = [row['column_name'] for row in cur.fetchall()]
+        
+        colunas_necessarias = [
+            'data_registro', 'data_pagamento', 'parcelas', 'parcela_atual', 'status',
+            'usuario_id', 'grupo', 'compartilhado'
+        ]
+        
+        for coluna in colunas_necessarias:
+            if coluna not in colunas_existentes:
+                if coluna == 'status':
+                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'Ativa'")
+                elif coluna == 'usuario_id':
+                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER REFERENCES usuarios(id)")
+                elif coluna == 'grupo':
+                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'padrao'")
+                elif coluna == 'compartilhado':
+                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 0")
+                elif coluna in ['data_registro', 'data_pagamento']:
+                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} DATE")
+                else:
+                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 1")
+                print(f"✅ Coluna {coluna} adicionada à tabela transacoes")
+    except Exception as e:
+        print(f"⚠️ Erro ao verificar/adicionar colunas: {e}")
     
     conn.commit()
     conn.close()
@@ -267,18 +200,6 @@ def inicializar_arquivos_cloud():
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config_default, f, indent=2)
         print(f"✅ config.json criado")
-    
-    # No Railway com PostgreSQL, não precisamos do arquivo SQLite
-    if not IS_RAILWAY:
-        # Criar banco SQLite se não existir (apenas para Streamlit Cloud/local)
-        if not DB_FILE.exists():
-            try:
-                # Criar conexão SQLite que criará o arquivo
-                conn = sqlite3.connect(str(DB_FILE))
-                conn.close()
-                print(f"✅ Arquivo SQLite criado: {DB_FILE}")
-            except Exception as e:
-                print(f"⚠️ Erro ao criar SQLite: {e}")
     
     # Criar planilha exemplo se não existir
     if not EXCEL_APOIO.exists():
@@ -299,33 +220,31 @@ def inicializar_arquivos_cloud():
 print("=" * 50)
 print(f"Sistema Financeiro Familiar")
 print(f"Ambiente: {'Railway' if IS_RAILWAY else 'Streamlit Cloud' if IS_STREAMLIT_CLOUD else 'Local'}")
-print(f"Banco: {'PostgreSQL' if IS_RAILWAY else 'SQLite'}")
-print(f"Arquivo DB: {DB_FILE}")
+print(f"Banco: PostgreSQL")
 print("=" * 50)
 
 # ---------- Sistema de Autenticação Melhorado ----------
 class SistemaAutenticacao:
-    def __init__(self, db_file="financeiro.db"):
-        self.db_file = db_file
+    def __init__(self):
         self._verificar_e_atualizar_estrutura_banco()
         self._criar_admin_padrao()
     
     def _verificar_e_atualizar_estrutura_banco(self):
         """Verifica e atualiza a estrutura do banco de dados"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         # 1. Criar tabela de usuários se não existir
         cur.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                senha_hash TEXT NOT NULL,
-                tipo TEXT NOT NULL DEFAULT 'COMUM',
-                nome TEXT,
-                email TEXT,
-                ativo INTEGER DEFAULT 1,
-                grupo TEXT DEFAULT 'padrao',
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                senha_hash VARCHAR(255) NOT NULL,
+                tipo VARCHAR(10) NOT NULL DEFAULT 'COMUM',
+                nome VARCHAR(100),
+                email VARCHAR(100),
+                ativo BOOLEAN DEFAULT TRUE,
+                grupo VARCHAR(50) DEFAULT 'padrao',
                 compartilhado INTEGER DEFAULT 1,
                 pode_compartilhar INTEGER DEFAULT 0,
                 data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -334,43 +253,49 @@ class SistemaAutenticacao:
         """)
         
         # 2. Verificar e adicionar colunas faltantes
-        colunas_necessarias = [
-            ('grupo', 'TEXT DEFAULT "padrao"'),
-            ('compartilhado', 'INTEGER DEFAULT 1'),
-            ('pode_compartilhar', 'INTEGER DEFAULT 0'),
-            ('data_criacao', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
-            ('data_ultimo_login', 'TIMESTAMP')
-        ]
-        
-        # Obter colunas existentes
-        cur.execute("PRAGMA table_info(usuarios)")
-        colunas_existentes = [col[1] for col in cur.fetchall()]
-        
-        # Adicionar colunas faltantes
-        for coluna, definicao in colunas_necessarias:
-            if coluna not in colunas_existentes:
-                try:
-                    cur.execute(f"ALTER TABLE usuarios ADD COLUMN {coluna} {definicao}")
-                    print(f"Coluna {coluna} adicionada à tabela usuarios")
-                except sqlite3.OperationalError as e:
-                    print(f"Erro ao adicionar coluna {coluna}: {e}")
+        try:
+            cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'usuarios'
+            """)
+            colunas_existentes = [row['column_name'] for row in cur.fetchall()]
+            
+            colunas_necessarias = [
+                ('grupo', 'VARCHAR(50) DEFAULT \'padrao\''),
+                ('compartilhado', 'INTEGER DEFAULT 1'),
+                ('pode_compartilhar', 'INTEGER DEFAULT 0'),
+                ('data_criacao', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+                ('data_ultimo_login', 'TIMESTAMP')
+            ]
+            
+            # Adicionar colunas faltantes
+            for coluna, definicao in colunas_necessarias:
+                if coluna not in colunas_existentes:
+                    try:
+                        cur.execute(f"ALTER TABLE usuarios ADD COLUMN {coluna} {definicao}")
+                        print(f"Coluna {coluna} adicionada à tabela usuarios")
+                    except Exception as e:
+                        print(f"Erro ao adicionar coluna {coluna}: {e}")
+        except Exception as e:
+            print(f"Erro ao verificar colunas: {e}")
         
         # 3. Criar tabela de logs
         cur.execute("""
             CREATE TABLE IF NOT EXISTS logs_acesso (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 usuario_id INTEGER,
-                acao TEXT,
+                acao VARCHAR(50),
                 descricao TEXT,
                 data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+                CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
             )
         """)
         
         # 4. Criar tabela de transações se não existir
         cur.execute("""
             CREATE TABLE IF NOT EXISTS transacoes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 data_registro DATE,
                 data_pagamento DATE,
                 pessoa TEXT,
@@ -391,28 +316,35 @@ class SistemaAutenticacao:
                 usuario_id INTEGER,
                 grupo TEXT DEFAULT 'padrao',
                 compartilhado INTEGER DEFAULT 0,
-                FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+                CONSTRAINT fk_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
             )
         """)
         
         # 5. Verificar colunas faltantes na tabela transacoes
-        cur.execute("PRAGMA table_info(transacoes)")
-        colunas_transacoes = [col[1] for col in cur.fetchall()]
-        
-        colunas_transacoes_necessarias = [
-            ('usuario_id', 'INTEGER'),
-            ('grupo', 'TEXT DEFAULT "padrao"'),
-            ('compartilhado', 'INTEGER DEFAULT 0'),
-            ('status', 'TEXT DEFAULT "Ativa"')
-        ]
-        
-        for coluna, definicao in colunas_transacoes_necessarias:
-            if coluna not in colunas_transacoes:
-                try:
-                    cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} {definicao}")
-                    print(f"Coluna {coluna} adicionada à tabela transacoes")
-                except sqlite3.OperationalError:
-                    pass
+        try:
+            cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'transacoes'
+            """)
+            colunas_transacoes = [row['column_name'] for row in cur.fetchall()]
+            
+            colunas_transacoes_necessarias = [
+                ('usuario_id', 'INTEGER REFERENCES usuarios(id)'),
+                ('grupo', 'TEXT DEFAULT \'padrao\''),
+                ('compartilhado', 'INTEGER DEFAULT 0'),
+                ('status', 'TEXT DEFAULT \'Ativa\'')
+            ]
+            
+            for coluna, definicao in colunas_transacoes_necessarias:
+                if coluna not in colunas_transacoes:
+                    try:
+                        cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} {definicao}")
+                        print(f"Coluna {coluna} adicionada à tabela transacoes")
+                    except Exception as e:
+                        print(f"Erro ao adicionar coluna {coluna}: {e}")
+        except Exception as e:
+            print(f"Erro ao verificar colunas transacoes: {e}")
         
         conn.commit()
         conn.close()
@@ -422,26 +354,26 @@ class SistemaAutenticacao:
     
     def _migrar_dados_existentes(self):
         """Migra dados existentes para a nova estrutura"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
             # Verificar se existem transações sem usuario_id
             cur.execute("SELECT COUNT(*) FROM transacoes WHERE usuario_id IS NULL")
-            count = cur.fetchone()[0]
+            count = cur.fetchone()['count']
             
             if count > 0:
                 print(f"⚠️ Migrando {count} transações existentes...")
                 
                 # Atribuir ao primeiro usuário ADM encontrado
                 cur.execute("SELECT id FROM usuarios WHERE tipo = 'ADM' ORDER BY id LIMIT 1")
-                admin_id = cur.fetchone()
+                admin_id_result = cur.fetchone()
                 
-                if admin_id:
-                    admin_id = admin_id[0]
+                if admin_id_result:
+                    admin_id = admin_id_result['id']
                     cur.execute("""
                         UPDATE transacoes 
-                        SET usuario_id = ?, grupo = 'padrao', compartilhado = 1
+                        SET usuario_id = %s, grupo = 'padrao', compartilhado = 1
                         WHERE usuario_id IS NULL
                     """, (admin_id,))
                     conn.commit()
@@ -454,27 +386,27 @@ class SistemaAutenticacao:
     
     def _criar_admin_padrao(self):
         """Cria usuário administrador padrão se não existir"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE username = 'admin'")
-            count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM usuarios WHERE username = %s", ("admin",))
+            count = cur.fetchone()['count']
             
             if count == 0:
                 # Senha padrão: admin123
                 senha_hash = self._hash_senha("admin123")
                 cur.execute("""
                     INSERT INTO usuarios (username, senha_hash, tipo, nome, email, grupo, compartilhado, pode_compartilhar)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, ("admin", senha_hash, "ADM", "Administrador", "admin@financeiro.com", "admin", 1, 1))
                 
                 conn.commit()
                 print("✅ Usuário administrador padrão criado: admin / admin123")
             else:
                 # Verificar se o admin tem senha atualizada
-                cur.execute("SELECT senha_hash FROM usuarios WHERE username = 'admin'")
-                senha_hash_atual = cur.fetchone()[0]
+                cur.execute("SELECT senha_hash FROM usuarios WHERE username = %s", ("admin",))
+                senha_hash_atual = cur.fetchone()['senha_hash']
                 
                 # Se a senha ainda for a padrão (admin123), avisar para alterar
                 senha_padrao_hash = self._hash_senha("admin123")
@@ -505,15 +437,11 @@ class SistemaAutenticacao:
         if not re.search(r"\d", senha):
             return False, "A senha deve conter pelo menos um número"
         
-        # Opcional: adicionar caractere especial
-        # if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", senha):
-        #     return False, "A senha deve conter pelo menos um caractere especial"
-        
         return True, "Senha válida"
     
     def autenticar(self, username, senha):
         """Autentica usuário e retorna dados se válido"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
@@ -521,7 +449,7 @@ class SistemaAutenticacao:
             cur.execute("""
                 SELECT id, username, senha_hash, tipo, nome, grupo, compartilhado 
                 FROM usuarios 
-                WHERE username = ? AND ativo = 1
+                WHERE username = %s AND ativo = TRUE
             """, (username,))
             
             usuario = cur.fetchone()
@@ -531,42 +459,35 @@ class SistemaAutenticacao:
             
             # Verificar senha
             senha_hash = self._hash_senha(senha)
-            if usuario[2] != senha_hash:
+            if usuario['senha_hash'] != senha_hash:
                 return False, None, "Senha incorreta"
             
             # Atualizar data do último login
             cur.execute("""
                 UPDATE usuarios 
                 SET data_ultimo_login = CURRENT_TIMESTAMP 
-                WHERE id = ?
-            """, (usuario[0],))
+                WHERE id = %s
+            """, (usuario['id'],))
             
             # Dados do usuário
             user_data = {
-                'id': usuario[0],
-                'username': usuario[1],
-                'tipo': usuario[3],
-                'nome': usuario[4],
-                'grupo': usuario[5] or 'padrao',
-                'compartilhado': usuario[6] or 0
+                'id': usuario['id'],
+                'username': usuario['username'],
+                'tipo': usuario['tipo'],
+                'nome': usuario['nome'],
+                'grupo': usuario['grupo'] or 'padrao',
+                'compartilhado': usuario['compartilhado'] or 0
             }
             
             # Log de acesso
             cur.execute("""
                 INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (?, 'LOGIN', 'Login realizado com sucesso')
-            """, (usuario[0],))
+                VALUES (%s, 'LOGIN', 'Login realizado com sucesso')
+            """, (usuario['id'],))
             
             conn.commit()
             return True, user_data, "Login realizado com sucesso"
             
-        except sqlite3.OperationalError as e:
-            error_msg = str(e)
-            if "no such column" in error_msg:
-                # Recriar estrutura do banco se houver erro de coluna
-                self._verificar_e_atualizar_estrutura_banco()
-                return False, None, "Estrutura do banco atualizada. Tente novamente."
-            return False, None, f"Erro na autenticação: {error_msg}"
         except Exception as e:
             return False, None, f"Erro na autenticação: {str(e)}"
         finally:
@@ -574,19 +495,19 @@ class SistemaAutenticacao:
     
     def alterar_senha(self, username, senha_atual, nova_senha):
         """Altera a senha do usuário"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
             # Verificar senha atual
-            cur.execute("SELECT id, senha_hash FROM usuarios WHERE username = ?", (username,))
+            cur.execute("SELECT id, senha_hash FROM usuarios WHERE username = %s", (username,))
             usuario = cur.fetchone()
             
             if not usuario:
                 return False, "Usuário não encontrado"
             
             senha_hash_atual = self._hash_senha(senha_atual)
-            if usuario[1] != senha_hash_atual:
+            if usuario['senha_hash'] != senha_hash_atual:
                 return False, "Senha atual incorreta"
             
             # Validar nova senha
@@ -598,15 +519,15 @@ class SistemaAutenticacao:
             nova_senha_hash = self._hash_senha(nova_senha)
             cur.execute("""
                 UPDATE usuarios 
-                SET senha_hash = ? 
-                WHERE id = ?
-            """, (nova_senha_hash, usuario[0]))
+                SET senha_hash = %s 
+                WHERE id = %s
+            """, (nova_senha_hash, usuario['id']))
             
             # Log
             cur.execute("""
                 INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (?, 'ALTERACAO_SENHA', 'Senha alterada com sucesso')
-            """, (usuario[0],))
+                VALUES (%s, 'ALTERACAO_SENHA', 'Senha alterada com sucesso')
+            """, (usuario['id'],))
             
             conn.commit()
             return True, "Senha alterada com sucesso"
@@ -618,7 +539,7 @@ class SistemaAutenticacao:
     
     def listar_usuarios(self):
         """Lista todos os usuários"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         cur.execute("""
@@ -636,22 +557,22 @@ class SistemaAutenticacao:
     
     def alterar_status_usuario(self, usuario_id, ativo):
         """Ativa/desativa um usuário"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
             cur.execute("""
                 UPDATE usuarios 
-                SET ativo = ? 
-                WHERE id = ?
-            """, (1 if ativo else 0, usuario_id))
+                SET ativo = %s 
+                WHERE id = %s
+            """, (True if ativo else False, usuario_id))
             
             # Log
             status = "ativado" if ativo else "desativado"
             cur.execute("""
                 INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (?, 'ALTERACAO_STATUS', 'Usuário ' || ?)
-            """, (usuario_id, status))
+                VALUES (%s, 'ALTERACAO_STATUS', %s)
+            """, (usuario_id, f'Usuário {status}'))
             
             conn.commit()
             return True, f"Usuário {status} com sucesso"
@@ -663,21 +584,21 @@ class SistemaAutenticacao:
     
     def alterar_tipo_usuario(self, usuario_id, novo_tipo):
         """Altera o tipo de usuário (ADM/COMUM)"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
             cur.execute("""
                 UPDATE usuarios 
-                SET tipo = ? 
-                WHERE id = ?
+                SET tipo = %s 
+                WHERE id = %s
             """, (novo_tipo, usuario_id))
             
             # Log
             cur.execute("""
                 INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (?, 'ALTERACAO_TIPO', 'Tipo alterado para ' || ?)
-            """, (usuario_id, novo_tipo))
+                VALUES (%s, 'ALTERACAO_TIPO', %s)
+            """, (usuario_id, f'Tipo alterado para {novo_tipo}'))
             
             conn.commit()
             return True, f"Tipo de usuário alterado para {novo_tipo}"
@@ -689,22 +610,22 @@ class SistemaAutenticacao:
     
     def alterar_grupo_usuario(self, usuario_id, novo_grupo, novo_compartilhado):
         """Altera o grupo e status de compartilhamento do usuário"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
             cur.execute("""
                 UPDATE usuarios 
-                SET grupo = ?, compartilhado = ?
-                WHERE id = ?
+                SET grupo = %s, compartilhado = %s
+                WHERE id = %s
             """, (novo_grupo, novo_compartilhado, usuario_id))
             
             # Log
             compartilhado_str = "compartilhado" if novo_compartilhado else "separado"
             cur.execute("""
                 INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (?, 'ALTERACAO_GRUPO', 'Grupo alterado para ' || ? || ' (' || ? || ')')
-            """, (usuario_id, novo_grupo, compartilhado_str))
+                VALUES (%s, 'ALTERACAO_GRUPO', %s)
+            """, (usuario_id, f'Grupo alterado para {novo_grupo} ({compartilhado_str})'))
             
             conn.commit()
             return True, f"Grupo alterado para {novo_grupo} ({compartilhado_str})"
@@ -716,7 +637,7 @@ class SistemaAutenticacao:
 
     def criar_usuario(self, username, senha, tipo="COMUM", nome=None, email=None, grupo="padrao", compartilhado=0):
         """Cria um novo usuário no sistema"""
-        conn = sqlite3.connect(self.db_file)
+        conn = get_conn()
         cur = conn.cursor()
         
         try:
@@ -726,8 +647,8 @@ class SistemaAutenticacao:
                 return False, mensagem, None
             
             # Verificar se usuário já existe
-            cur.execute("SELECT COUNT(*) FROM usuarios WHERE username = ?", (username,))
-            if cur.fetchone()[0] > 0:
+            cur.execute("SELECT COUNT(*) FROM usuarios WHERE username = %s", (username,))
+            if cur.fetchone()['count'] > 0:
                 return False, "Usuário já existe", None
             
             # Criar hash da senha
@@ -736,16 +657,17 @@ class SistemaAutenticacao:
             # Inserir novo usuário
             cur.execute("""
                 INSERT INTO usuarios (username, senha_hash, tipo, nome, email, grupo, compartilhado)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (username, senha_hash, tipo, nome, email, grupo, compartilhado))
             
-            usuario_id = cur.lastrowid
+            usuario_id = cur.fetchone()['id']
             
             # Log
             cur.execute("""
                 INSERT INTO logs_acesso (usuario_id, acao, descricao)
-                VALUES (?, 'CRIACAO_USUARIO', 'Novo usuário criado: ' || ?)
-            """, (usuario_id, username))
+                VALUES (%s, 'CRIACAO_USUARIO', %s)
+            """, (usuario_id, f'Novo usuário criado: {username}'))
             
             conn.commit()
             return True, "Usuário criado com sucesso", usuario_id
@@ -765,19 +687,9 @@ def inicializar_sistema_completo():
         # Garantir que tabelas existem (redundante, mas seguro)
         ensure_tables_exist()
         
-        # A migração já é feita no __init__ do SistemaAutenticacao
-        # Não precisa chamar migrar_dados_existentes() novamente
-        
         return auth_system
     except Exception as e:
         st.error(f"❌ Erro crítico na inicialização do sistema: {e}")
-        # Tentar criar um banco de dados mínimo
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            conn.close()
-        except:
-            pass
-        # Criar novo sistema mesmo com erro
         return SistemaAutenticacao()
 
 # Inicializar auth como None primeiro
@@ -816,32 +728,6 @@ def ajustar_para_fatura(data_compra, dia_fatura=10):
         return date(data_compra.year + 1, 1, dia_fatura)
     else:
         return date(data_compra.year, data_compra.month + 1, dia_fatura)
-    
-    # Verificar e adicionar colunas ausentes se necessário
-    colunas_necessarias = [
-        'data_registro', 'data_pagamento', 'parcelas', 'parcela_atual', 'status',
-        'usuario_id', 'grupo', 'compartilhado'
-    ]
-    
-    for coluna in colunas_necessarias:
-        try:
-            if coluna == 'status':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'Ativa'")
-            elif coluna == 'usuario_id':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER")
-            elif coluna == 'grupo':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} TEXT DEFAULT 'padrao'")
-            elif coluna == 'compartilhado':
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 0")
-            elif coluna in ['data_registro', 'data_pagamento']:
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} DATE")
-            else:
-                cur.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass  # Coluna já existe
-    
-    conn.commit()
-    conn.close()
 
 def inserir_transacao(tipo, data_registro, data_pagamento, descricao, valor, categoria, forma, extra_fields=None, usuario_id=None):
     pessoa = "Ambos"
@@ -872,11 +758,11 @@ def inserir_transacao(tipo, data_registro, data_pagamento, descricao, valor, cat
     compartilhado_usuario = 0
     
     if usuario_id:
-        cur.execute("SELECT grupo, compartilhado FROM usuarios WHERE id = ?", (usuario_id,))
+        cur.execute("SELECT grupo, compartilhado FROM usuarios WHERE id = %s", (usuario_id,))
         resultado = cur.fetchone()
         if resultado:
-            grupo_usuario = resultado[0] if resultado[0] else "padrao"
-            compartilhado_usuario = resultado[1] if resultado[1] else 0
+            grupo_usuario = resultado['grupo'] if resultado['grupo'] else "padrao"
+            compartilhado_usuario = resultado['compartilhado'] if resultado['compartilhado'] else 0
     
     # Determinar compartilhamento baseado no usuário
     compartilhado = compartilhado_usuario
@@ -887,7 +773,7 @@ def inserir_transacao(tipo, data_registro, data_pagamento, descricao, valor, cat
             recorrente, dia_fixo, pessoa_responsavel, no_cartao, investimento, vr, 
             forma_pagamento, parcelas, parcela_atual, status, usuario_id, grupo, compartilhado
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         data_registro.isoformat(), data_pagamento.isoformat(), pessoa, categoria, tipo, 
         float(valor), descricao, recorrente, dia_fixo, pessoa_responsavel, no_cartao, 
@@ -907,12 +793,12 @@ def carregar_transacoes(usuario_id=None):
         usuario_compartilhado = None
         
         if usuario_id:
-            cur.execute("SELECT tipo, grupo, compartilhado FROM usuarios WHERE id = ?", (usuario_id,))
+            cur.execute("SELECT tipo, grupo, compartilhado FROM usuarios WHERE id = %s", (usuario_id,))
             resultado = cur.fetchone()
             if resultado:
-                usuario_tipo = resultado[0]
-                usuario_grupo = resultado[1] if resultado[1] else "padrao"
-                usuario_compartilhado = resultado[2]
+                usuario_tipo = resultado['tipo']
+                usuario_grupo = resultado['grupo'] if resultado['grupo'] else "padrao"
+                usuario_compartilhado = resultado['compartilhado']
         
         # Construir query base
         query = """
@@ -927,16 +813,20 @@ def carregar_transacoes(usuario_id=None):
         if usuario_tipo != "ADM":
             if usuario_compartilhado == 1:
                 # Usuário com base compartilhada: ver transações do mesmo grupo
-                query += " AND t.grupo = ?"
+                query += " AND t.grupo = %s"
                 params.append(usuario_grupo)
             else:
                 # Usuário com base separada: ver apenas suas transações
-                query += " AND t.usuario_id = ?"
+                query += " AND t.usuario_id = %s"
                 params.append(usuario_id)
         
         query += " ORDER BY t.data_pagamento DESC, t.id DESC"
         
-        df = pd.read_sql_query(query, conn, params=params)
+        # Usar pandas para executar a query com parâmetros
+        if params:
+            df = pd.read_sql_query(query, conn, params=params)
+        else:
+            df = pd.read_sql_query(query, conn)
         
         if not df.empty:
             date_columns = ['data_registro', 'data_pagamento']
@@ -967,23 +857,23 @@ def processar_recorrencias_automaticas(usuario_id=None):
     params = []
     
     if usuario_id:
-        query += " AND t.usuario_id = ?"
+        query += " AND t.usuario_id = %s"
         params.append(usuario_id)
     
     cur.execute(query, params)
     transacoes_recorrentes = cur.fetchall()
     
-    cur.execute("PRAGMA table_info(transacoes)")
-    colunas_info = cur.fetchall()
-    colunas = [col[1] for col in colunas_info]
-    colunas.append('grupo_usuario')
-    colunas.append('compartilhado_usuario')
+    colunas = ['id', 'data_registro', 'data_pagamento', 'pessoa', 'categoria', 'tipo', 
+               'valor', 'descricao', 'recorrente', 'dia_fixo', 'pessoa_responsavel', 
+               'no_cartao', 'investimento', 'vr', 'forma_pagamento', 'parcelas', 
+               'parcela_atual', 'status', 'usuario_id', 'grupo', 'compartilhado',
+               'grupo_usuario', 'compartilhado_usuario']
     
     hoje = date.today()
     novas_transacoes = 0
     
     for transacao in transacoes_recorrentes:
-        transacao_dict = dict(zip(colunas, transacao))
+        transacao_dict = dict(transacao)
         
         data_registro_original = transacao_dict['data_registro']
         data_pagamento_original = transacao_dict['data_pagamento']
@@ -995,8 +885,8 @@ def processar_recorrencias_automaticas(usuario_id=None):
         forma_pagamento = transacao_dict['forma_pagamento']
         no_cartao = transacao_dict.get('no_cartao', 0)
         usuario_id_trans = transacao_dict.get('usuario_id')
-        grupo_usuario = transacao_dict.get('grupo_usuario', 'padrao')
-        compartilhado_usuario = transacao_dict.get('compartilhado_usuario', 0)
+        grupo_usuario = transacao_dict.get('grupo', 'padrao')
+        compartilhado_usuario = transacao_dict.get('compartilhado', 0)
         
         if isinstance(data_registro_original, str):
             try:
@@ -1030,13 +920,14 @@ def processar_recorrencias_automaticas(usuario_id=None):
                 if data_pagamento_virtual <= hoje and data_pagamento_virtual > data_pagamento_original:
                     cur.execute("""
                         SELECT COUNT(*) FROM transacoes 
-                        WHERE descricao LIKE ? 
-                        AND strftime('%Y-%m', data_pagamento) = ?
+                        WHERE descricao LIKE %s 
+                        AND EXTRACT(YEAR FROM data_pagamento) = %s
+                        AND EXTRACT(MONTH FROM data_pagamento) = %s
                         AND recorrente = 1
-                        AND usuario_id = ?
-                    """, (f"%{descricao_original}%", data_pagamento_virtual.strftime('%Y-%m'), usuario_id_trans))
+                        AND usuario_id = %s
+                    """, (f"%{descricao_original}%", data_pagamento_virtual.year, data_pagamento_virtual.month, usuario_id_trans))
                     
-                    existe = cur.fetchone()[0]
+                    existe = cur.fetchone()['count']
                     
                     if not existe:
                         nova_descricao = f"{descricao_original} ({data_pagamento_virtual.strftime('%m/%Y')})"
@@ -1048,8 +939,8 @@ def processar_recorrencias_automaticas(usuario_id=None):
                             data_pagamento_final = data_pagamento_virtual
                         
                         dados_insercao = {
-                            'data_registro': data_registro_nova.isoformat(),
-                            'data_pagamento': data_pagamento_final.isoformat(),
+                            'data_registro': data_registro_nova,
+                            'data_pagamento': data_pagamento_final,
                             'pessoa': transacao_dict.get('pessoa', 'Ambos'),
                             'categoria': categoria,
                             'tipo': tipo,
@@ -1070,23 +961,18 @@ def processar_recorrencias_automaticas(usuario_id=None):
                             'compartilhado': compartilhado_usuario
                         }
                         
-                        colunas_insert = []
-                        valores_insert = []
-                        for col, val in dados_insercao.items():
-                            if col in [c[1] for c in colunas_info]:
-                                colunas_insert.append(col)
-                                valores_insert.append(val)
+                        colunas_insert = list(dados_insercao.keys())
+                        valores_insert = list(dados_insercao.values())
                         
-                        if colunas_insert:
-                            placeholders = ', '.join(['?' for _ in colunas_insert])
-                            colunas_str = ', '.join(colunas_insert)
-                            
-                            cur.execute(f"""
-                                INSERT INTO transacoes ({colunas_str})
-                                VALUES ({placeholders})
-                            """, valores_insert)
-                            
-                            novas_transacoes += 1
+                        placeholders = ', '.join(['%s'] * len(colunas_insert))
+                        colunas_str = ', '.join(colunas_insert)
+                        
+                        cur.execute(f"""
+                            INSERT INTO transacoes ({colunas_str})
+                            VALUES ({placeholders})
+                        """, valores_insert)
+                        
+                        novas_transacoes += 1
             except Exception as e:
                 st.error(f"Erro ao processar recorrência: {e}")
                 continue
@@ -1101,11 +987,11 @@ def excluir_transacao(transacao_id, usuario_id=None):
     cur = conn.cursor()
     
     try:
-        query = "UPDATE transacoes SET status = 'Excluída' WHERE id = ?"
+        query = "UPDATE transacoes SET status = 'Excluída' WHERE id = %s"
         params = [transacao_id]
         
         if usuario_id:
-            query += " AND usuario_id = ?"
+            query += " AND usuario_id = %s"
             params.append(usuario_id)
         
         cur.execute(query, params)
@@ -1132,26 +1018,26 @@ def editar_transacao(transacao_id, novos_dados, usuario_id=None):
         
         for campo, valor in novos_dados.items():
             if valor is not None and valor != '':
-                campos.append(f"{campo} = ?")
+                campos.append(f"{campo} = %s")
                 valores.append(valor)
         
         if not campos:
             return False, "Nenhum campo válido para atualizar"
         
         # Adicionar condições
-        query_condicoes = " WHERE id = ?"
+        query_condicoes = " WHERE id = %s"
         valores.append(transacao_id)
         
         if usuario_id:
-            query_condicoes += " AND usuario_id = ?"
+            query_condicoes += " AND usuario_id = %s"
             valores.append(usuario_id)
         
         query = f"UPDATE transacoes SET {', '.join(campos)} {query_condicoes}"
         cur.execute(query, valores)
         conn.commit()
         
-        cur.execute("SELECT changes()")
-        changes = cur.fetchone()[0]
+        # No PostgreSQL, rowcount mostra quantas linhas foram afetadas
+        changes = cur.rowcount
         
         if changes > 0:
             return True, "Transação atualizada com sucesso"
@@ -2234,34 +2120,34 @@ def pagina_configuracoes():
         try:
             # Contar usuários
             cur.execute("SELECT COUNT(*) FROM usuarios")
-            total_usuarios = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            total_usuarios = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'ADM'")
-            admins = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            admins = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             cur.execute("SELECT COUNT(*) FROM usuarios WHERE tipo = 'COMUM'")
-            comuns = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            comuns = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             # Contar transações
             cur.execute("SELECT COUNT(*) FROM transacoes")
-            total_transacoes = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            total_transacoes = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Receita'")
-            receitas = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            receitas = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             cur.execute("SELECT COUNT(*) FROM transacoes WHERE tipo = 'Despesa'")
-            despesas = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            despesas = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             # Contar grupos
             cur.execute("SELECT COUNT(DISTINCT grupo) FROM usuarios")
-            total_grupos = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            total_grupos = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             # Usuários por tipo de base
             cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 1")
-            compartilhados = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            compartilhados = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
             cur.execute("SELECT COUNT(*) FROM usuarios WHERE compartilhado = 0")
-            separados = cur.fetchone()[0] if cur.rowcount > 0 else 0
+            separados = cur.fetchone()['count'] if cur.rowcount > 0 else 0
             
         except Exception as e:
             st.error(f"Erro ao obter estatísticas: {e}")

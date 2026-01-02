@@ -1,20 +1,19 @@
 #!/bin/bash
+echo "🔄 Iniciando Financeiro Familiar no Railway..."
 
-# Configurar porta
-PORT=${PORT:-8080}
+# Definir porta para o Railway
+export PORT=${PORT:-8080}
 
-echo "========================================"
-echo "🚀 INICIANDO FINANCEIRO FAMILIAR"
-echo "🌐 Porta: $PORT"
-echo "🏥 Healthcheck: / (raiz)"
-echo "========================================"
+# Remover arquivos de lock do SQLite se existirem
+find . -name "*.db-*" -type f -delete 2>/dev/null || true
+find . -name "*.db-wal" -type f -delete 2>/dev/null || true
 
-# Iniciar Streamlit
+# Iniciar o Streamlit
+echo "🚀 Iniciando Streamlit na porta $PORT..."
 streamlit run app.py \
-    --server.port=$PORT \
-    --server.address=0.0.0.0 \
-    --server.enableCORS=false \
-    --server.enableXsrfProtection=false \
-    --server.headless=true \
-    --browser.serverAddress="0.0.0.0" \
-    --browser.gatherUsageStats=false
+  --server.port=$PORT \
+  --server.address=0.0.0.0 \
+  --server.headless=true \
+  --server.fileWatcherType=none \
+  --browser.serverAddress="financeiro-familiar-production.up.railway.app" \
+  --browser.gatherUsageStats=false

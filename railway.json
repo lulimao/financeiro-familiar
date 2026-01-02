@@ -10,6 +10,6 @@
     "healthcheckPath": "/health",
     "healthcheckTimeout": 30,
     "healthcheckInterval": 30,
-    "healthcheckPort": 8081
+    "healthcheckPort": 8080
   }
 }

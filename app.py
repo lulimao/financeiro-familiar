@@ -11,17 +11,14 @@ import hashlib
 import re
 import os
 import traceback
-
-# ==================== HEALTHCHECK PARA RAILWAY (PASSO 3) ====================
 import http.server
 import socketserver
 import threading
+from http.server import BaseHTTPRequestHandler
 
-def start_healthcheck_server():
-    """Inicia um servidor HTTP simples para healthcheck em uma porta diferente"""
-    PORT_HEALTH = 8081
-    
-    class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+# Healthcheck simples para Railway
+def run_healthcheck():
+    class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/health':
                 self.send_response(200)
@@ -32,17 +29,14 @@ def start_healthcheck_server():
                 self.send_response(404)
                 self.end_headers()
     
-    with socketserver.TCPServer(("", PORT_HEALTH), HealthCheckHandler) as httpd:
-        print(f"✅ Healthcheck server running on port {PORT_HEALTH}")
+    PORT = 8080  # MESMA PORTA DO STREAMLIT
+    with socketserver.TCPServer(("", PORT), HealthHandler) as httpd:
+        print(f"✅ Healthcheck rodando na porta {PORT}")
         httpd.serve_forever()
 
-# Iniciar o healthcheck apenas se estiver no Railway
-if os.environ.get('RAILWAY_ENVIRONMENT') == 'true' or os.environ.get('DATABASE_URL'):
-    healthcheck_thread = threading.Thread(target=start_healthcheck_server, daemon=True)
-    healthcheck_thread.start()
-    print("✅ Healthcheck server iniciado na porta 8081")
-
-# ==================== FIM DO HEALTHCHECK ====================
+# Iniciar healthcheck em thread separada
+healthcheck_thread = threading.Thread(target=run_healthcheck, daemon=True)
+healthcheck_thread.start()
 
 # Debug para Railway
 print("=" * 60)
@@ -52,10 +46,7 @@ print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
 print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
 print("=" * 60)
 
-# Configurar porta do Railway
-PORT = int(os.environ.get("PORT", 8080))
-
-st.write("Versão atualizada às: 00h24") # mude para o horário que você fizer o push
+st.write("Versão atualizada às: 01h20")
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")

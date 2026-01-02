@@ -12,6 +12,14 @@ import re
 import os
 import traceback
 
+# Debug para Railway
+print("=" * 60)
+print(f"INICIANDO FINANCEIRO FAMILIAR")
+print(f"Porta: {os.environ.get('PORT', '8080')}")
+print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
+print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
+print("=" * 60)
+
 # Debug: Verificar variáveis de ambiente
 print("=" * 50)
 print(f"PORT: {os.environ.get('PORT')}")

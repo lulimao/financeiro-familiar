@@ -12,6 +12,9 @@ import re
 import os
 import traceback
 
+# Configurar porta do Railway
+PORT = int(os.environ.get("PORT", 8080))
+
 st.write("Versão atualizada às: 00h24") # mude para o horário que você fizer o push
 
 # Adicione no início do app.py, logo após as importações:

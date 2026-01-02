@@ -4,3 +4,4 @@ psycopg2-binary==2.9.9
 SQLAlchemy==2.0.25
 python-dotenv==1.0.0
 plotly==5.18.0
+openpyxl==3.1.2  # Para ler Excel

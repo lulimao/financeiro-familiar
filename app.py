@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import date, datetime, timedelta
 import json
 import plotly.express as px
+import plotly.graph_objects as go
 import calendar
 import hashlib
 import re
@@ -12,6 +13,42 @@ import os
 import traceback
 
 st.write("Versão atualizada às: 00h24") # mude para o horário que você fizer o push
+
+# Adicione no início do app.py, logo após as importações:
+from flask import Flask, Response
+import os
+
+# Criar um endpoint minimalista de healthcheck
+def create_healthcheck_endpoint():
+    """Cria um endpoint simples para healthcheck"""
+    import http.server
+    import socketserver
+    import threading
+    
+    class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/health':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'OK')
+            else:
+                self.send_response(404)
+                self.end_headers()
+    
+    def run_server():
+        port = int(os.environ.get('HEALTHCHECK_PORT', 8080))
+        with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+            print(f"Healthcheck server running on port {port}")
+            httpd.serve_forever()
+    
+    # Iniciar em uma thread separada
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+
+# Iniciar healthcheck apenas no Railway
+if os.environ.get('RAILWAY_ENVIRONMENT') == 'true' or 'DATABASE_URL' in os.environ:
+    create_healthcheck_endpoint()
 
 #INICIO
 

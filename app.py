@@ -20,13 +20,13 @@ print(f"Railway Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'Não')}")
 print(f"Database URL: {'Sim' if os.environ.get('DATABASE_URL') else 'Não'}")
 print("=" * 60)
 
-st.write("Versão atualizada às: 13:03")
+st.write("Versão atualizada às: 13:30")
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="💰 Financeiro Familiar", layout="wide")
 
 # ---------- DETECTAR AMBIENTE E BANCO ----------
-IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') == 'true' or 'DATABASE_URL' in os.environ
+IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') in ['true', 'production'] or 'DATABASE_URL' in os.environ
 
 if IS_RAILWAY:
     import psycopg2

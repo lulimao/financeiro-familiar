@@ -16,15 +16,8 @@ COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 3. Copiar o resto do código
+# 4. REMOVA as linhas ENV STREAMLIT_SERVER_PORT antigas
+# Vamos usar apenas a porta que o Railway injeta sem forçar nomes fixos
+
 COPY . .
-
-# 4. Configurações do Streamlit para o Railway
-ENV STREAMLIT_SERVER_PORT=8080
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
-ENV STREAMLIT_SERVER_HEADLESS=true
-
-
-# Removemos as ENVs que estavam dando conflito de tipo
-# O comando abaixo força o uso do número da porta injetado pelo Railway
-CMD ["sh", "-c", "streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true --server.fileWatcherType=none --browser.gatherUsageStats=false"]
+CMD streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true

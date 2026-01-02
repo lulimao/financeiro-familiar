@@ -24,5 +24,7 @@ ENV STREAMLIT_SERVER_PORT=8080
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 ENV STREAMLIT_SERVER_HEADLESS=true
 
-# O Railway usará a variável $PORT automaticamente
-CMD sh -c "streamlit run app.py --server.port=${PORT:-8080}"
+
+# Removemos as ENVs que estavam dando conflito de tipo
+# O comando abaixo força o uso do número da porta injetado pelo Railway
+CMD ["sh", "-c", "streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true --server.fileWatcherType=none --browser.gatherUsageStats=false"]

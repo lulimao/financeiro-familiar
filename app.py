@@ -221,8 +221,7 @@ def inicializar_arquivos_cloud():
             categorias_list = ['Alimentação', 'Aluguel', 'Bebidas', 'Estética', 'Cabeleireiro', 'Calçados', 'Combustível', 'Contas', 'Crédito Ca', 'Delivery', 'Educação', 'Emergenciais', 'Entretenimento',
                                'Estacionamento', 'Estudos', 'Fatura', 'Gasolina', 'Imprevistos', 'Hobbies', 'Impostos', 'Internet', 'Investimento', 'Jogos', 'Lazer', 'Luz', 'Mercado', 'Moradia', 'Narguile',
                                'Outros', 'Pessoal', 'Pet', 'Presentes', 'Rendimentos', 'Roupas', 'Salario', 'Saúde', 'Serviços', 'Streaming', 'Supermercado', 'Transporte', 'Viagens']
-            formas_list = ['Dinheiro', 'Débito', 'Crédito', 
-                          'Transferência', 'Pix', 'Boleto', 'Pix', 'Pix']
+            formas_list = ['Dinheiro', 'Boleto', 'Crédito', 'Conta', 'Débito', 'Dinheiro', 'Pix', 'VA/VR']
             
             df_exemplo = pd.DataFrame({
                 'Categorias': categorias_list,
@@ -949,7 +948,7 @@ def ler_categorias_formas():
     categorias_default = ["Alimentação", "Aluguel", "Bebidas", "Estética", "Cabeleireiro", "Calçados", "Combustível", "Contas", "Delivery", "Educação", "Emergenciais", "Entretenimento", "Estacionamento",
                           "Estudos", "Fatura", "Gasolina", "Imprevistos", "Hobbies", "Impostos", "Internet", "Investimento", "Jogos", "Lazer", "Luz", "Mercado", "Moradia", "Narguile", "Outros", "Pessoal",
                           "Pet", "Presentes", "Rendimentos", "Roupas", "Salario", "Saúde", "Serviços", "Streaming", "Supermercado", "Transporte", "Viagens"]
-    formas_default = ["Dinheiro", "Débito", "Crédito", "Transferência", "Pix", "Boleto"]
+    formas_default = ['Dinheiro', 'Boleto', 'Crédito', 'Conta', 'Débito', 'Dinheiro', 'Pix', 'VA/VR']
     
     if not EXCEL_APOIO.exists():
         return categorias_default, formas_default

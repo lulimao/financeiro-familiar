@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import date, datetime, timedelta
 import json
-import plotly.express as px
+#import plotly.express as px
 import calendar
 import hashlib
 import re

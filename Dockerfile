@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 1. Instalar dependências do sistema (essencial para psycopg2/PostgreSQL)
+# 1. Dependências do sistema
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
@@ -11,13 +11,18 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Copiar apenas requirements para cache otimizado
+# 2. Instalação de pacotes
 COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. REMOVA as linhas ENV STREAMLIT_SERVER_PORT antigas
-# Vamos usar apenas a porta que o Railway injeta sem forçar nomes fixos
-
+# 3. Copiar código
 COPY . .
-CMD streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true
+
+# 4. Forçar variáveis de ambiente dentro do container para sobrescrever o erro
+ENV STREAMLIT_SERVER_PORT=8080
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV PORT=8080
+
+# Usar o comando fixo sem referenciar ${PORT} para testar se o Healthcheck passa
+CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.headless=true"]

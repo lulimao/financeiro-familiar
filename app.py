@@ -11,7 +11,7 @@ import re
 import os
 import traceback
 
-st.write("Versão atualizada às: 00h18") # mude para o horário que você fizer o push
+st.write("Versão atualizada às: 00h24") # mude para o horário que você fizer o push
 
 #INICIO
 

@@ -19,6 +19,6 @@ RUN pip install --upgrade pip setuptools wheel \
 
 COPY . .
 
-EXPOSE 10000
+EXPOSE ${PORT}
 
-CMD ["streamlit", "run", "app.py", "--server.port=10000", "--server.address=0.0.0.0"]
+CMD ["sh", "-c", "streamlit run app.py --server.port=${PORT:-10000} --server.address=0.0.0.0"]

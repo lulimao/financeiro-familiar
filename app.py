@@ -1738,7 +1738,7 @@ def pagina_gerenciar_usuarios():
             for idx, usuario in enumerate(usuarios):
                 user_key = f"user_{usuario['id']}_{idx}"
                 
-                with st.expander(f"{usuario['username']} ({usuario['tipo']})", key=f"exp_{user_key}"):
+                with st.expander(f"{usuario['username']} ({usuario['tipo']})"):
                     col1, col2, col3 = st.columns([2, 1, 1])
                     
                     with col1:

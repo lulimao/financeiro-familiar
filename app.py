@@ -11,32 +11,6 @@ import hashlib
 import re
 import os
 import traceback
-import http.server
-import socketserver
-import threading
-from http.server import BaseHTTPRequestHandler
-
-# Healthcheck simples para Railway
-def run_healthcheck():
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/health':
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'OK')
-            else:
-                self.send_response(404)
-                self.end_headers()
-    
-    PORT = 8080  # MESMA PORTA DO STREAMLIT
-    with socketserver.TCPServer(("", PORT), HealthHandler) as httpd:
-        print(f"✅ Healthcheck rodando na porta {PORT}")
-        httpd.serve_forever()
-
-# Iniciar healthcheck em thread separada
-healthcheck_thread = threading.Thread(target=run_healthcheck, daemon=True)
-healthcheck_thread.start()
 
 # Debug para Railway
 print("=" * 60)

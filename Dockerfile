@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 1. Dependências do sistema
+# 1. Dependências do sistema (Otimizado)
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
@@ -19,10 +19,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 3. Copiar código
 COPY . .
 
-# 4. Forçar variáveis de ambiente dentro do container para sobrescrever o erro
-ENV STREAMLIT_SERVER_PORT=8080
+# 4. Configurações do Streamlit
+# Não fixamos a porta aqui com ENV, deixamos para o comando de execução
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
-ENV PORT=8080
+ENV STREAMLIT_SERVER_HEADLESS=true
 
-# Usar o comando fixo sem referenciar ${PORT} para testar se o Healthcheck passa
-CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.headless=true"]
+# O segredo está aqui: usamos o Shell form para que o SO resolva a variável $PORT
+CMD streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
